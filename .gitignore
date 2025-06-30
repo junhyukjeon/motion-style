@@ -1,0 +1,17 @@
+# Ignore Python cache
+__pycache__/
+*.pyc
+
+# Ignore model checkpoints and results
+checkpoints/
+result/
+
+# Ignore notebooks outputs
+*.ipynb_checkpoints/
+
+# Ignore dataset (since it's actual data)
+dataset/
+
+# Optional: Ignore VSCode configs or OS files
+.vscode/
+.DS_Store

@@ -5,8 +5,8 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from sklearn.manifold import TSNE
 
-from salad.t2m import Text2Motion
-from style_dataset import StyleDataset
+from salad_backup.t2m import Text2Motion
+from data.style_dataset import StyleDataset
 
 # --- Setup ---
 BATCH_SIZE = 32

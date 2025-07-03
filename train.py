@@ -1,202 +1,223 @@
 # --- Imports ---
+import argparse
+import json
 import matplotlib.pyplot as plt
 import numpy as np
 import os
 import random
 import torch
 import torch.nn.functional as F
+import yaml
 from datetime import datetime
 from sklearn.manifold import TSNE
+from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from model import StyleEncoder
-from salad_backup.t2m import Text2Motion
-from data.style_dataset import StyleDataset
+from data.dataset import StyleDataset
+from data.sampler import StyleSampler
+from model.networks import StyleEncoder
+from salad.t2m import Text2Motion
+from utils.losses import supervised_contrastive_loss
 
-# --- Losses --- 
-def supervised_contrastive_loss(z, labels, temperature=0.07):
-    # Mean pool frames and joints
-    z = z.mean(dim=(1,2))
-
-    # Normalize
-    z = F.normalize(z, dim=1)
-
-    # labels: (B,)
-    sim = torch.matmul(z, z.T) / temperature  # (B, B)
-    N = sim.size(0)
-
-    logits_mask = ~torch.eye(N, dtype=torch.bool, device=z.device)
-    labels = labels.unsqueeze(0)  # (1, B)
-    pos_mask = (labels == labels.T) & logits_mask  # (B, B)
-
-    exp_sim = torch.exp(sim) * logits_mask
-    log_prob = sim - torch.log(exp_sim.sum(dim=1, keepdim=True) + 1e-8)
-
-    mean_log_prob_pos = (pos_mask.float() * log_prob).sum(dim=1) / (pos_mask.sum(dim=1) + 1e-8)
-    loss = -mean_log_prob_pos.mean()
-    return loss
-
-def tsne_evaluate(model, t2m, loader, device, epoch=None, label="valid", result_dir="./result", label_to_name_dict=None):
-    MAX_SAMPLES = 3000
-    num_collected = 0
-
+def evaluate(model, t2m, loader, device, epoch=None, label="valid", result_dir="", label_to_name_dict=None, max_samples=3000, writer=None):
     model.eval()
-    all_embeddings = []
-    all_labels = []
-
-    pbar = tqdm(total=MAX_SAMPLES, desc=f"[t-SNE] Extracting ({label})")
+    all_embeddings, all_labels = [], []
+    pbar = tqdm(total=max_samples, desc=f"[t-SNE] Extracting ({label})")
 
     with torch.no_grad():
-        for motions, labels in loader:
+        for motions, labels, _ in loader:
             motions = motions.to(device)
             labels = labels.to(device)
+            z, _ = t2m.vae.encode(motions)     # (B, T, J, D)
+            out_pooled = model(z).mean(dim=(1, 2))
+            mask = torch.isfinite(out_pooled).all(dim=1)
 
-            z, _ = t2m.vae.encode(motions)  # (B, T, J, D)
-
-            if torch.isnan(z).any() or torch.isinf(z).any():
-                print("❌ Detected NaN or Inf in z")
-                print(f"  Stats: min={z.min().item():.4f}, max={z.max().item():.4f}, mean={z.mean().item():.4f}")
-                print(f"  Count of invalid entries: {(~torch.isfinite(z)).sum().item()} / {z.numel()}")
-                print(f"  Batch labels: {labels.tolist()}")
-                continue
-
-            out = model(z)
-            out_pooled = out.mean(dim=(1, 2))  # (B, D)
-            out_cpu = out_pooled.cpu()
-            labels_cpu = labels.cpu()
-
-            valid_mask = torch.isfinite(out_cpu).all(dim=1)
-            if valid_mask.sum().item() < len(valid_mask):
-                print(f"⚠️ Skipping {len(valid_mask) - valid_mask.sum().item()} invalid embeddings")
-            out_cpu = out_cpu[valid_mask]
-            labels_cpu = labels_cpu[valid_mask]
-
-            # Trim to MAX_SAMPLES if needed
-            if num_collected + len(out_cpu) > MAX_SAMPLES:
-                needed = MAX_SAMPLES - num_collected
-                out_cpu = out_cpu[:needed]
-                labels_cpu = labels_cpu[:needed]
+            out_cpu = out_pooled[mask].cpu()[:max_samples - len(all_labels)]
+            labels_cpu = labels[mask].cpu()[:len(out_cpu)]
 
             all_embeddings.append(out_cpu)
             all_labels.append(labels_cpu)
-            num_collected += len(out_cpu)
             pbar.update(len(out_cpu))
 
-            if num_collected >= MAX_SAMPLES:
+            if len(torch.cat(all_labels)) >= max_samples:
                 break
 
     pbar.close()
-
-    if num_collected == 0:
+    if not all_labels:
         print("❌ No valid samples collected for t-SNE!")
         return
 
-    # Stack embeddings and labels
-    all_embeddings = torch.cat(all_embeddings, dim=0).numpy()
-    all_labels = torch.cat(all_labels, dim=0).numpy()
+    embeddings_np = torch.cat(all_embeddings).numpy()
+    labels_np = torch.cat(all_labels).numpy()
+    X = TSNE(n_components=2, perplexity=30, metric='cosine', random_state=42).fit_transform(embeddings_np)
 
-    # Run t-SNE
-    tsne = TSNE(n_components=2, perplexity=30, metric='cosine', random_state=42)
-    X_2d = tsne.fit_transform(all_embeddings)
-
-    # Plot
-    unique_labels = np.unique(all_labels)
+    unique_labels = np.unique(labels_np)
     num_classes = len(unique_labels)
     cmap = plt.cm.get_cmap('nipy_spectral', num_classes)
 
-    plt.figure(figsize=(8, 6))
-    scatter = plt.scatter(X_2d[:, 0], X_2d[:, 1], c=all_labels, cmap=cmap, alpha=0.7, s=10)
+    fig, ax = plt.subplots(figsize=(8, 6))
+    scatter = ax.scatter(X[:, 0], X[:, 1], c=labels_np, cmap=cmap, alpha=0.7, s=10)
+    cbar = plt.colorbar(scatter, ax=ax)
 
-    cbar = plt.colorbar(scatter, ticks=unique_labels)
-    cbar.set_label("Style Label Index")
-
-    # Hide tick labels if too many classes
     if num_classes <= 20:
         cbar.set_ticks(unique_labels)
         if label_to_name_dict:
-            label_names = [label_to_name_dict[idx] for idx in unique_labels]
+            label_names = [label_to_name_dict.get(idx, str(idx)) for idx in unique_labels]
             cbar.set_ticklabels(label_names)
-        else:
-            cbar.set_ticklabels([])
+    else:
+        cbar.remove()
 
-    title = f"t-SNE of Style Embeddings ({label}, Epoch {epoch})" if epoch else f"t-SNE of Style Embeddings ({label})"
-    plt.title(title)
-    plt.tight_layout()
+    # Save the plot
+    os.makedirs(os.path.join(result_dir, label), exist_ok=True)
+    save_path = os.path.join(result_dir, label, f"tsne_epoch{epoch:03d}.png")
+    fig.savefig(save_path)
 
-    save_path = f"{result_dir}/{label}/tsne_epoch{epoch:03d}.png"
-    plt.savefig(save_path)
-    plt.close()
-    print(f"[t-SNE] Saved plot with {num_collected} samples → {save_path}")
+    # ✅ Correct: Pass figure explicitly
+    if writer is not None:
+        writer.add_figure(f"Plot/{label}", fig, global_step=epoch)
 
+    plt.close(fig)
+    print(f"[t-SNE] Saved → {save_path}")
+
+def validate(model, t2m, loader, device, temperature):
+    model.eval()
+    total_loss = 0
+    num_batches = 0
+
+    with torch.no_grad():
+        for motions, labels, _ in loader:
+            motions = motions.to(device)
+            labels = labels.to(device)
+
+            z, _ = t2m.vae.encode(motions)
+            if torch.isnan(z).any() or torch.isinf(z).any():
+                print("Skipping validation batch due to NaN/Inf in z")
+                continue
+
+            out = model(z)
+            out_pooled = out.mean(dim=(1, 2))
+            loss = supervised_contrastive_loss(out_pooled, labels, temperature)
+
+            total_loss += loss.item()
+            num_batches += 1
+
+    avg_loss = total_loss / max(1, num_batches)
+    return avg_loss
+
+def load_config():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, required=True, help='Path to config file (YAML)')
+    args = parser.parse_args()
+
+    config_path = args.config
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+
+    config_basename = os.path.basename(config_path)
+    config["run_name"] = os.path.splitext(config_basename)[0]
+    config["result_dir"] = os.path.join(config["result_dir"], config["run_name"])
+    config["checkpoint_dir"] = os.path.join(config["checkpoint_dir"], config["run_name"])
+    return config
+
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 if __name__ == "__main__":
-    RUN_NAME = datetime.now().strftime("%Y%m%d_%H%M%S")  # e.g., '20250627_2012'
-    RESULT_DIR = f"./result/{RUN_NAME}"
-    CHECKPOINT_DIR = f"./checkpoints/style_encoder/{RUN_NAME}"
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    config = load_config()
 
-    os.makedirs(RESULT_DIR, exist_ok=True)
-    os.makedirs(os.path.join(RESULT_DIR, "valid"), exist_ok=True)
-    os.makedirs(os.path.join(RESULT_DIR, "test"), exist_ok=True)
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    os.makedirs(config["result_dir"], exist_ok=True)
+    os.makedirs(os.path.join(config["result_dir"], "valid"), exist_ok=True)
+    os.makedirs(os.path.join(config["result_dir"], "test"), exist_ok=True)
+    os.makedirs(config["checkpoint_dir"], exist_ok=True)
+    writer = SummaryWriter(log_dir=os.path.join("./result/tensorboard", config["run_name"]))
 
+    set_seed(config["random_seed"])
 
-    def set_seed(seed=42):
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
-    set_seed(42)
+    # --- Load dataset stats ---
+    MEAN = np.load(config["mean_path"])
+    STD = np.load(config["std_path"])
 
-    # --- Hyperparameters --- 
-    BATCH_SIZE = 32
-    SAMPLES_PER_CLASS = 4
-    EMBED_DIM = 64
-    HIDDEN_DIM = 128
-    EPOCHS = 100
-    LR = 1e-3
-    TEMPERATURE = 0.07
-    DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    TRAIN_JSON = './dataset/100style/100style_train_train.json'
-    VAL_JSON   = './dataset/100style/100style_train_valid.json'
-    TEST_JSON  = './dataset/100style/100style_test.json'
-    MOTION_DIR = './dataset/100style/new_joint_vecs'
-    MEAN = np.load('./checkpoints/t2m/Comp_v6_KLD005/meta/mean.npy')
-    STD   = np.load('./checkpoints/t2m/Comp_v6_KLD005/meta/std.npy')
-    WINDOW_SIZE = 64
+    # --- Load and split styles ---
+    with open(config["style_json"]) as f:
+        full_label_to_ids = json.load(f)
+
+    all_styles = list(full_label_to_ids.keys())
+    train_styles, test_styles = train_test_split(all_styles, test_size=1 - config["train_split"], random_state=config["random_seed"])
+
+    train_label_to_ids, valid_label_to_ids = {}, {}
+    for style in train_styles:
+        motions = full_label_to_ids[style]
+        if len(motions) < 2:
+            train_label_to_ids[style] = motions
+        else:
+            train_ids, valid_ids = train_test_split(motions, test_size=config["val_split"], random_state=config["random_seed"])
+            train_label_to_ids[style] = train_ids
+            valid_label_to_ids[style] = valid_ids
+
+    test_label_to_ids = {style: full_label_to_ids[style] for style in test_styles}
+    if config.get("num_test_styles") is not None:
+        rng = random.Random(config["random_seed"])
+        selected_test_styles = rng.sample(list(test_label_to_ids.keys()), config["num_test_styles"])
+        test_label_to_ids = {style: test_label_to_ids[style] for style in selected_test_styles}
 
     # --- Load datasets ---
-    train_dataset = StyleDataset(TRAIN_JSON, MOTION_DIR, mean=MEAN, std=STD, window_size=WINDOW_SIZE)
-    valid_dataset = StyleDataset(VAL_JSON, MOTION_DIR, mean=MEAN, std=STD, window_size=WINDOW_SIZE)
-    test_dataset = StyleDataset(TEST_JSON, MOTION_DIR, mean=MEAN, std=STD, window_size=WINDOW_SIZE)
+    train_dataset = StyleDataset(
+        motion_dir=config["motion_dir"],
+        mean=MEAN,
+        std=STD,
+        window_size=config["window_size"],
+        label_to_ids=train_label_to_ids
+    )
+
+    valid_dataset = StyleDataset(
+        motion_dir=config["motion_dir"],
+        mean=MEAN,
+        std=STD,
+        window_size=config["window_size"],
+        label_to_ids=valid_label_to_ids
+    )
+
+    test_dataset = StyleDataset(
+        motion_dir=config["motion_dir"],
+        mean=MEAN,
+        std=STD,
+        window_size=config["window_size"],
+        label_to_ids=test_label_to_ids
+    )
 
     # --- Samplers & Loaders ---
-    train_sampler = StyleSampler(train_dataset, BATCH_SIZE, SAMPLES_PER_CLASS)
+    train_sampler = StyleSampler(train_dataset, config["batch_size"], config["samples_per_class"])
     train_loader  = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=4)
-    valid_loader = DataLoader(valid_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
+    valid_loader = DataLoader(valid_dataset, batch_size=config["batch_size"], shuffle=True, num_workers=4)
+    test_loader = DataLoader(test_dataset, batch_size=config["batch_size"], shuffle=True, num_workers=4)
 
     # --- Model & Optimizer ---
-    denoiser_name = "t2m_denoiser_vpred_vaegelu"
-    dataset_name = "t2m"
+    denoiser_name = config["denoiser_name"]
+    dataset_name = config["dataset_name"]
     t2m = Text2Motion(denoiser_name, dataset_name)
-    model = StyleEncoder().to(DEVICE)
-    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+    model = StyleEncoder().to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=config["lr"])
 
     # --- Training Loop ---
     t2m.vae.freeze()
-    latest_model_path = f"{CHECKPOINT_DIR}/style_encoder_latest.pt"
-    checkpoint_dir = CHECKPOINT_DIR
+    latest_model_path = f"{config['checkpoint_dir']}/style_encoder_latest.pt"
+    checkpoint_dir = config["checkpoint_dir"]
 
-    for epoch in range(1, EPOCHS + 1):
+    for epoch in range(1, config["epochs"] + 1):
         train_sampler.set_epoch(epoch)
         model.train()
         total_loss = 0
 
-        for motions, labels in tqdm(train_loader, desc=f"[Train] Epoch {epoch}"):
-            motions = motions.to(DEVICE)
-            labels = labels.to(DEVICE)
+        for motions, labels, _ in tqdm(train_loader, desc=f"[Train] Epoch {epoch}"):
+            motions = motions.to(device)
+            labels = labels.to(device)
 
             with torch.no_grad():
                 z, _ = t2m.vae.encode(motions)
@@ -204,8 +225,9 @@ if __name__ == "__main__":
                     print("Skipping batch due to NaN/Inf in z") 
                     continue
                 
-            out = model(z)
-            loss = supervised_contrastive_loss(out, labels, TEMPERATURE)
+            out = model(z) # (B, T, J, D)
+            out_pooled = out.mean(dim=(1,2)) # (B, D)
+            loss = supervised_contrastive_loss(out_pooled, labels, config["temperature"])
 
             optimizer.zero_grad()
             loss.backward()
@@ -219,11 +241,20 @@ if __name__ == "__main__":
 
         # Save latest model always
         torch.save(model.state_dict(), latest_model_path)
-        tsne_evaluate(model, t2m, valid_loader, DEVICE, epoch, label="valid", result_dir=RESULT_DIR, label_to_name_dict=valid_dataset.label_to_style)
-        tsne_evaluate(model, t2m, test_loader, DEVICE, epoch, label="test", result_dir=RESULT_DIR, label_to_name_dict=test_dataset.label_to_style)
+
+        valid_loss = validate(model, t2m, valid_loader, device, config["temperature"])
+        print(f"Epoch {epoch} - Valid Loss: {valid_loss:.4f}")
+
+        writer.add_scalar("Loss/Train", avg_loss, epoch)
+        writer.add_scalar("Loss/Valid", valid_loss, epoch)
+
+        evaluate(model, t2m, valid_loader, device, epoch, label="valid", result_dir=config["result_dir"], label_to_name_dict=valid_dataset.label_to_style, writer=writer)
+        evaluate(model, t2m, test_loader, device, epoch, label="test", result_dir=config["result_dir"], label_to_name_dict=test_dataset.label_to_style, writer=writer)
 
         # Save checkpoint every 10 epochs
         if epoch % 10 == 0:
             ckpt_path = f"{checkpoint_dir}/style_encoder_epoch{epoch:03d}.pt"
             torch.save(model.state_dict(), ckpt_path)
             print(f"Checkpoint saved: {ckpt_path}")
+
+    writer.close()

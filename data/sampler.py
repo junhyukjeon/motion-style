@@ -24,14 +24,28 @@ class StyleSampler(BatchSampler):
         self.batches = []
         self.generate_batches()
 
-    def generate_batches(self):
+    def generate_batches(self, fixed_label=49): # 49 is "Neutral"
         self.batches = []
         num_batches = len(self.dataset) // self.batch_size
+
         for _ in range(num_batches):
-            selected_labels = random.sample(self.labels, self.batch_size // self.samples_per_class)
+            # Step 1: Choose one fixed label if provided
+            if fixed_label is not None:
+                selected_labels = [fixed_label]
+                candidate_labels = [l for l in self.labels if l != fixed_label]
+            else:
+                selected_labels = []
+                candidate_labels = self.labels[:]
+
+            # Step 2: Randomly pick the remaining labels
+            num_labels_per_batch = self.batch_size // self.samples_per_class
+            selected_labels += random.sample(candidate_labels, num_labels_per_batch - len(selected_labels))
+
+            # Step 3: Sample frames for each label
             batch = []
             for label in selected_labels:
                 batch.extend(random.sample(self.label_to_frame_indices[label], self.samples_per_class))
+
             self.batches.append(batch)
 
     def __iter__(self):

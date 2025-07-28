@@ -17,7 +17,8 @@ from tqdm import tqdm
 
 from data.dataset import StyleDataset
 from data.sampler import StyleSampler
-from model.networks import StyleContentEncoder
+from model.networks import StyleEncoder
+from salad.t2m import Text2Motion
 from utils.losses import supervised_contrastive_loss
 
 def evaluate(model, t2m, loader, device, epoch=None, label="valid", result_dir="", label_to_name_dict=None, max_samples=3000, writer=None):
@@ -29,7 +30,7 @@ def evaluate(model, t2m, loader, device, epoch=None, label="valid", result_dir="
         for motions, labels, _ in loader:
             motions = motions.to(device)
             labels = labels.to(device)
-            z, _ = t2m.vae.encode(motions) # (B, T, J, D)
+            z, _ = t2m.vae.encode(motions)     # (B, T, J, D)
             out_pooled = model(z).mean(dim=(1, 2))
             mask = torch.isfinite(out_pooled).all(dim=1)
 
@@ -120,14 +121,12 @@ def load_config():
     config["checkpoint_dir"] = os.path.join(config["checkpoint_dir"], config["run_name"])
     return config
 
-
 def set_seed(seed=42):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -151,8 +150,6 @@ if __name__ == "__main__":
 
     all_styles = list(full_label_to_ids.keys())
     train_styles, test_styles = train_test_split(all_styles, test_size=1 - config["train_split"], random_state=config["random_seed"])
-
-    import pdb; pdb.set_trace()
 
     train_label_to_ids, valid_label_to_ids = {}, {}
     for style in train_styles:
@@ -195,78 +192,73 @@ if __name__ == "__main__":
         label_to_ids=test_label_to_ids
     )
 
+    import pdb; pdb.set_trace()
+
     # --- Samplers & Loaders ---
     train_sampler = StyleSampler(train_dataset, config["batch_size"], config["samples_per_class"])
     train_loader  = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=4)
     valid_loader = DataLoader(valid_dataset, batch_size=config["batch_size"], shuffle=True, num_workers=4)
     test_loader = DataLoader(test_dataset, batch_size=config["batch_size"], shuffle=True, num_workers=4)
 
+    # --- Model & Optimizer ---
+    denoiser_name = config["denoiser_name"]
+    dataset_name = config["dataset_name"]
+    t2m = Text2Motion(denoiser_name, dataset_name)
+    model = StyleEncoder().to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=config["lr"])
 
-def train_one_epoch(model, dataloader, optimizer, recon_loss_fn, recombination_loss_fn=None, log_every=10):
-    model.train()
-    total_loss = 0
-    total_recon = 0
-    total_recomb = 0
+    import pdb; pdb.set_trace()
 
-    for step, (motions, labels, _) in enumerate(dataloader):
-        motions = motions.to(model.device)
+    # --- Training Loop ---
+    t2m.vae.freeze()
+    latest_model_path = f"{config['checkpoint_dir']}/style_encoder_latest.pt"
+    checkpoint_dir = config["checkpoint_dir"]
 
-        # --- Forward pass through StyleContentEncoder ---
-        out = model(motions)  # dict: z_latent, z_style, z_content, gamma, beta
+    for epoch in range(1, config["epochs"] + 1):
+        train_sampler.set_epoch(epoch)
+        model.train()
+        total_loss = 0
 
-        z_content = out["z_content"]                # [B, T, J, D]
-        gamma = out["gamma"]                        # [B, 1, 1, D]
-        beta = out["beta"]                          # [B, 1, 1, D]
-        z_style = out["z_style"]                    # [B, D]
-
-        # --- Reconstruct latent ---
-        z_recon = gamma * z_content + beta          # [B, T, J, D]
-
-        with torch.no_grad():
-            recon_motion = model.vae.decode(z_recon)  # [B, T, J, V]
-
-        # --- Compute reconstruction loss ---
-        recon_loss = recon_loss_fn(recon_motion, motions)
-
-        # --- Optional: recombination loss ---
-        recomb_loss = 0.0
-        if recombination_loss_fn is not None:
-            B = motions.size(0)
-            perm = torch.randperm(B)
-            gamma_perm = gamma[perm]
-            beta_perm = beta[perm]
-            z_mix = z_content * gamma_perm + beta_perm
+        for motions, labels, _ in tqdm(train_loader, desc=f"[Train] Epoch {epoch}"):
+            motions = motions.to(device)
+            labels = labels.to(device)
 
             with torch.no_grad():
-                recon_mix = model.vae.decode(z_mix)
-                z_mix_reencoded = model.vae.encode(recon_mix)
+                z, _ = t2m.vae.encode(motions)
+                if torch.isnan(z).any() or torch.isinf(z).any():
+                    print("Skipping batch due to NaN/Inf in z") 
+                    continue
+                
+            out = model(z) # (B, T, J, D)
+            out_pooled = out.mean(dim=(1,2)) # (B, D)
+            loss = supervised_contrastive_loss(out_pooled, labels, config["temperature"])
 
-            z_style_hat = model.style_net(z_mix_reencoded)
-            mu_hat = z_mix_reencoded.mean(dim=(1, 2), keepdim=True)
-            std_hat = z_mix_reencoded.std(dim=(1, 2), keepdim=True) + 1e-6
-            z_content_hat = (z_mix_reencoded - mu_hat) / std_hat
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-            style_loss = recombination_loss_fn(z_style_hat, z_style[perm].detach())
-            content_loss = recombination_loss_fn(z_content_hat.detach(), z_content.detach())
+            loss_val = loss.item()
+            total_loss += loss_val
 
-            recomb_loss = style_loss + content_loss
+        avg_loss = total_loss / len(train_loader)
+        print(f"Epoch {epoch} - Train Loss: {avg_loss:.4f}")
 
-        # --- Combine losses and backprop ---
-        loss = recon_loss + recomb_loss
+        # Save latest model always
+        torch.save(model.state_dict(), latest_model_path)
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        valid_loss = validate(model, t2m, valid_loader, device, config["temperature"])
+        print(f"Epoch {epoch} - Valid Loss: {valid_loss:.4f}")
 
-        total_loss += loss.item()
-        total_recon += recon_loss.item()
-        total_recomb += recomb_loss.item() if recombination_loss_fn else 0
+        writer.add_scalar("Loss/Train", avg_loss, epoch)
+        writer.add_scalar("Loss/Valid", valid_loss, epoch)
 
-        if step % log_every == 0:
-            print(f"[Step {step:03d}] Loss: {loss.item():.4f} | Recon: {recon_loss.item():.4f} | Recomb: {recomb_loss:.4f}")
+        evaluate(model, t2m, valid_loader, device, epoch, label="valid", result_dir=config["result_dir"], label_to_name_dict=valid_dataset.label_to_style, writer=writer)
+        evaluate(model, t2m, test_loader, device, epoch, label="test", result_dir=config["result_dir"], label_to_name_dict=test_dataset.label_to_style, writer=writer)
 
-    return {
-        "loss": total_loss / len(dataloader),
-        "recon": total_recon / len(dataloader),
-        "recomb": total_recomb / len(dataloader) if recombination_loss_fn else 0.0
-    }
+        # Save checkpoint every 10 epochs
+        if epoch % 10 == 0:
+            ckpt_path = f"{checkpoint_dir}/style_encoder_epoch{epoch:03d}.pt"
+            torch.save(model.state_dict(), ckpt_path)
+            print(f"Checkpoint saved: {ckpt_path}")
+
+    writer.close()

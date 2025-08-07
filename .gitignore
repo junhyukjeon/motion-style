@@ -4,7 +4,8 @@ __pycache__/
 
 # Ignore model checkpoints and results
 checkpoints/
-result/
+results/
+video/
 
 # Ignore notebooks outputs
 *.ipynb_checkpoints/
@@ -15,3 +16,6 @@ dataset/
 # Optional: Ignore VSCode configs or OS files
 .vscode/
 .DS_Store
+
+fbx/
+env/

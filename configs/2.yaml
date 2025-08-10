@@ -7,7 +7,7 @@ checkpoint_dir: ./checkpoints/sc
 batch_size: 32
 samples_per_class: 4
 epochs: 50
-lr: 0.001
+lr: 0.0001
 temperature: 0.07
 
 # --- Loss Scaling ---
@@ -45,4 +45,5 @@ style_content_encoder:
 style_json: ./dataset/100style/100style_clean_clean.json
 
 # --- Evaluation Settings ---
-num_test_styles: 10
+num_valid_styles: 80
+num_test_styles: 20

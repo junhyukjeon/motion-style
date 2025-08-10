@@ -5,19 +5,24 @@ import torch
 from torch.utils.data import Dataset
 
 class StyleDataset(Dataset):
-    def __init__(self, motion_dir, mean, std, window_size, label_to_ids):
+    def __init__(self, motion_dir, mean, std, window_size, label_to_ids, style_to_label, ids_to_content):
         # Normalize motion data for VAE
         self.mean = mean
         self.std = std 
         self.window_size = window_size
 
         # Style-to-label mapping
-        self.style_to_label = {style: i for i, style in enumerate(label_to_ids.keys())}
+        self.style_to_label = style_to_label
         self.label_to_style = {i: style for style, i in self.style_to_label.items()}
 
-        self.data = []     # List of (motion_id, motion_array)
-        self.labels = []   # List of label indices
-        self.lengths = []  # number of valid windows for each motion
+        # IDs to content
+        self.ids_to_content = ids_to_content
+
+        self.data = []       # List of (motion_id, motion_array)
+        self.labels = []     # List of label indices
+        self.lengths = []    # number of valid windows for each motion
+        self.ids = []        #
+        self.ids_to_idx = {} #
 
         for style_name, motion_ids in label_to_ids.items():
             label_idx = self.style_to_label[style_name]
@@ -30,6 +35,8 @@ class StyleDataset(Dataset):
                     self.data.append((motion_id, motion))
                     self.labels.append(label_idx)
                     self.lengths.append(motion.shape[0] - window_size)
+                    self.ids.append(motion_id)
+                    self.ids_to_idx[motion_id] = len(self.data) - 1
                 except Exception as e:
                     print(f"❌ Error loading {motion_id}: {e}")
 
@@ -50,5 +57,6 @@ class StyleDataset(Dataset):
         window = motion[offset:offset + self.window_size]
         window = (window - self.mean) / self.std
         label = self.labels[motion_idx]
+        content = self.ids_to_content[motion_id]
 
-        return torch.tensor(window, dtype=torch.float32), label, motion_id
+        return torch.tensor(window, dtype=torch.float32), label, content, motion_id

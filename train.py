@@ -1,5 +1,6 @@
 # --- Imports ---
 import argparse
+import colorcet as cc
 import json
 import matplotlib.pyplot as plt
 import numpy as np
@@ -8,102 +9,73 @@ import random
 import torch
 import torch.nn.functional as F
 import yaml
-from datetime import datetime
 from sklearn.manifold import TSNE
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+from matplotlib.colors import to_rgb
 
+# HMMMMMMMM
 from data.dataset import StyleDataset
-from data.sampler import StyleSampler
-from model.networks import StyleContentEncoder
-from utils.losses import supervised_contrastive_loss
+from data.sampler import SAMPLER_REGISTRY
+from model.networks import NETWORK_REGISTRY
+from utils.loss import LOSS_REGISTRY
+from utils.plot import plot_tsne
 
-def evaluate(model, t2m, loader, device, epoch=None, label="valid", result_dir="", label_to_name_dict=None, max_samples=3000, writer=None):
+# import pdb; pdb.set_trace()
+
+def validate(model, loader, device, config, loss_cfg, loss_fns, writer=None, epoch=None):
     model.eval()
-    all_embeddings, all_labels = [], []
-    pbar = tqdm(total=max_samples, desc=f"[t-SNE] Extracting ({label})")
+    losses_total = {}
+    num_batches = len(loader)
 
     with torch.no_grad():
-        for motions, labels, _ in loader:
-            motions = motions.to(device)
-            labels = labels.to(device)
-            z, _ = t2m.vae.encode(motions) # (B, T, J, D)
-            out_pooled = model(z).mean(dim=(1, 2))
-            mask = torch.isfinite(out_pooled).all(dim=1)
+        pbar = tqdm(loader, desc=f"[Valid] Epoch {epoch}")
+        for motions, labels, contents, _ in pbar:
+            motions, labels = motions.to(device), labels.to(device)
+            out = model.encode(motions)
 
-            out_cpu = out_pooled[mask].cpu()[:max_samples - len(all_labels)]
-            labels_cpu = labels[mask].cpu()[:len(out_cpu)]
+            # --- Loss calculation ---
+            losses = {}
+            for name, fn in loss_fns.items():
+                spec = loss_cfg[name]
+                if name == "stylecon":
+                    style_loss, content_loss = fn(spec, model, out, labels)
+                    losses["style"] = (spec["weight"] * style_loss, style_loss)
+                    losses["content"] = (spec["weight"] * content_loss, content_loss)
+                else:
+                    val = fn(spec, model, out, labels)
+                    losses[name] = (spec["weight"] * val, val)
 
-            all_embeddings.append(out_cpu)
-            all_labels.append(labels_cpu)
-            pbar.update(len(out_cpu))
-
-            if len(torch.cat(all_labels)) >= max_samples:
-                break
-
-    pbar.close()
-    if not all_labels:
-        print("❌ No valid samples collected for t-SNE!")
-        return
-
-    embeddings_np = torch.cat(all_embeddings).numpy()
-    labels_np = torch.cat(all_labels).numpy()
-    X = TSNE(n_components=2, perplexity=30, metric='cosine', random_state=42).fit_transform(embeddings_np)
-
-    unique_labels = np.unique(labels_np)
-    num_classes = len(unique_labels)
-    cmap = plt.cm.get_cmap('nipy_spectral', num_classes)
-
-    fig, ax = plt.subplots(figsize=(8, 6))
-    scatter = ax.scatter(X[:, 0], X[:, 1], c=labels_np, cmap=cmap, alpha=0.7, s=10)
-    cbar = plt.colorbar(scatter, ax=ax)
-
-    if num_classes <= 20:
-        cbar.set_ticks(unique_labels)
-        if label_to_name_dict:
-            label_names = [label_to_name_dict.get(idx, str(idx)) for idx in unique_labels]
-            cbar.set_ticklabels(label_names)
-    else:
-        cbar.remove()
-
-    # Save the plot
-    os.makedirs(os.path.join(result_dir, label), exist_ok=True)
-    save_path = os.path.join(result_dir, label, f"tsne_epoch{epoch:03d}.png")
-    fig.savefig(save_path)
-
-    # ✅ Correct: Pass figure explicitly
-    if writer is not None:
-        writer.add_figure(f"Plot/{label}", fig, global_step=epoch)
-
-    plt.close(fig)
-    print(f"[t-SNE] Saved → {save_path}")
-
-def validate(model, t2m, loader, device, temperature):
-    model.eval()
-    total_loss = 0
-    num_batches = 0
-
-    with torch.no_grad():
-        for motions, labels, _ in loader:
-            motions = motions.to(device)
-            labels = labels.to(device)
-
-            z, _ = t2m.vae.encode(motions)
-            if torch.isnan(z).any() or torch.isinf(z).any():
-                print("Skipping validation batch due to NaN/Inf in z")
+            # --- Total loss ---
+            loss = sum(s for (s, _) in losses.values())
+            if not torch.isfinite(loss):
+                print("❌ NaN or Inf detected in loss. Skipping batch.")
                 continue
 
-            out = model(z)
-            out_pooled = out.mean(dim=(1, 2))
-            loss = supervised_contrastive_loss(out_pooled, labels, temperature)
+            pbar.set_postfix(loss=loss.item())
 
-            total_loss += loss.item()
-            num_batches += 1
+            for name, (scaled, raw) in losses.items():
+                if name not in losses_total:
+                    losses_total[name] = (0.0, 0.0)
+                prev_scaled, prev_raw = losses_total[name]
+                losses_total[name] = (
+                    prev_scaled + scaled.item(),
+                    prev_raw + raw.item()
+                )
 
-    avg_loss = total_loss / max(1, num_batches)
-    return avg_loss
+    # --- Logging ---
+    loss_total = sum(s for (s, _) in losses_total.values())
+
+    if writer is not None and epoch is not None:
+        writer.add_scalar("Valid/Total", loss_total / num_batches, epoch)
+        for name, (scaled_sum, raw_sum) in losses_total.items():
+            writer.add_scalar(f"Valid/Raw/{name}", raw_sum / num_batches, epoch)
+            writer.add_scalar(f"Valid/Scaled/{name}", scaled_sum / num_batches, epoch)
+
+    return loss_total / num_batches
+
 
 def load_config():
     parser = argparse.ArgumentParser()
@@ -133,140 +105,148 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = load_config()
 
+    # --- Result directories ---
     os.makedirs(config["result_dir"], exist_ok=True)
     os.makedirs(os.path.join(config["result_dir"], "valid"), exist_ok=True)
-    os.makedirs(os.path.join(config["result_dir"], "test"), exist_ok=True)
-    os.makedirs(config["checkpoint_dir"], exist_ok=True)
-    writer = SummaryWriter(log_dir=os.path.join("./result/tensorboard", config["run_name"]))
-
+    writer = SummaryWriter(log_dir=os.path.join("./results/tensorboard", config["run_name"]))
+    
     set_seed(config["random_seed"])
 
-    # --- Load dataset stats ---
+    # --- Dataset Stats ---
     MEAN = np.load(config["mean_path"])
     STD = np.load(config["std_path"])
 
-    # --- Load and split styles ---
+    # --- Style Split ---
     with open(config["style_json"]) as f:
         full_label_to_ids = json.load(f)
 
-    all_styles = list(full_label_to_ids.keys())
-    train_styles, test_styles = train_test_split(all_styles, test_size=1 - config["train_split"], random_state=config["random_seed"])
+    all_styles_sorted = sorted(full_label_to_ids.keys())
+    global_style_to_label = {style: i for i, style in enumerate(all_styles_sorted)}
+    global_label_to_style = {i: style for style, i in global_style_to_label.items()}
 
-    import pdb; pdb.set_trace()
+    non_neutral_styles = [s for s in all_styles_sorted if s != "Neutral"]
+    train_styles, valid_styles = train_test_split(non_neutral_styles, test_size=19, random_state=config["random_seed"])
+    train_styles.append("Neutral")
+    valid_styles.append("Neutral")
 
-    train_label_to_ids, valid_label_to_ids = {}, {}
-    for style in train_styles:
-        motions = full_label_to_ids[style]
-        if len(motions) < 2:
-            train_label_to_ids[style] = motions
-        else:
-            train_ids, valid_ids = train_test_split(motions, test_size=config["val_split"], random_state=config["random_seed"])
-            train_label_to_ids[style] = train_ids
-            valid_label_to_ids[style] = valid_ids
+    train_label_to_ids = {style: full_label_to_ids[style] for style in train_styles}
+    valid_label_to_ids = {style: full_label_to_ids[style] for style in valid_styles}
 
-    test_label_to_ids = {style: full_label_to_ids[style] for style in test_styles}
-    if config.get("num_test_styles") is not None:
-        rng = random.Random(config["random_seed"])
-        selected_test_styles = rng.sample(list(test_label_to_ids.keys()), config["num_test_styles"])
-        test_label_to_ids = {style: test_label_to_ids[style] for style in selected_test_styles}
+    # --- Content Mapping ---
+    with open(config["content_json"]) as f:
+        content_to_ids = json.load(f)
+    
+    ids_to_content = {}
+    for content_type, motion_ids in content_to_ids.items():
+        for m_id in motion_ids:
+            ids_to_content[m_id] = content_type
 
-    # --- Load datasets ---
-    train_dataset = StyleDataset(
-        motion_dir=config["motion_dir"],
-        mean=MEAN,
-        std=STD,
-        window_size=config["window_size"],
-        label_to_ids=train_label_to_ids
-    )
+    # --- Dataset & Loader ---
+    train_dataset = StyleDataset(config["motion_dir"], MEAN, STD, config["window_size"], train_label_to_ids, global_style_to_label, ids_to_content)
+    valid_dataset = StyleDataset(config["motion_dir"], MEAN, STD, config["window_size"], valid_label_to_ids, global_style_to_label, ids_to_content)
 
-    valid_dataset = StyleDataset(
-        motion_dir=config["motion_dir"],
-        mean=MEAN,
-        std=STD,
-        window_size=config["window_size"],
-        label_to_ids=valid_label_to_ids
-    )
+    sampler_cfg = config['sampler']
+    train_sampler = SAMPLER_REGISTRY[sampler_cfg['type']](sampler_cfg, train_dataset)
+    valid_sampler = SAMPLER_REGISTRY[sampler_cfg['type']](sampler_cfg, valid_dataset)
+    
+    train_loader  = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=8)
+    valid_loader = DataLoader(valid_dataset, batch_sampler=valid_sampler, num_workers=8)
 
-    test_dataset = StyleDataset(
-        motion_dir=config["motion_dir"],
-        mean=MEAN,
-        std=STD,
-        window_size=config["window_size"],
-        label_to_ids=test_label_to_ids
-    )
+    # --- Model, Optimizer, Loss ---
+    model_cfg = config['model']
+    model = NETWORK_REGISTRY[model_cfg['type']](model_cfg).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'])
 
-    # --- Samplers & Loaders ---
-    train_sampler = StyleSampler(train_dataset, config["batch_size"], config["samples_per_class"])
-    train_loader  = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=4)
-    valid_loader = DataLoader(valid_dataset, batch_size=config["batch_size"], shuffle=True, num_workers=4)
-    test_loader = DataLoader(test_dataset, batch_size=config["batch_size"], shuffle=True, num_workers=4)
-
-
-def train_one_epoch(model, dataloader, optimizer, recon_loss_fn, recombination_loss_fn=None, log_every=10):
+    loss_cfg = config['loss'] 
+    loss_fns = {name: LOSS_REGISTRY[name] for name in loss_cfg}
+    
+    # --- Training ---
+    best_val_loss = float('inf')
     model.train()
-    total_loss = 0
-    total_recon = 0
-    total_recomb = 0
+    model.encoder.vae.freeze()
 
-    for step, (motions, labels, _) in enumerate(dataloader):
-        motions = motions.to(model.device)
+    for epoch in range(1, config['epochs'] + 1):
+        train_sampler.generate_batches()
+        losses_total = {}
+        
+        pbar = tqdm(train_loader, desc=f"[Train] Epoch {epoch}")
+        for motions, labels, contents, _ in pbar:
+            motions, labels = motions.to(device), labels.to(device)
+            out = model.encode(motions)
 
-        # --- Forward pass through StyleContentEncoder ---
-        out = model(motions)  # dict: z_latent, z_style, z_content, gamma, beta
+            import pdb; pdb.set_trace()
 
-        z_content = out["z_content"]                # [B, T, J, D]
-        gamma = out["gamma"]                        # [B, 1, 1, D]
-        beta = out["beta"]                          # [B, 1, 1, D]
-        z_style = out["z_style"]                    # [B, D]
+            losses = {}
+            for name, fn in loss_fns.items():
+                spec = loss_cfg[name]
+                if name == "stylecon":
+                    style_loss, content_loss = fn(spec, model, out, labels)
+                    losses["style"] = (spec["weight"] * style_loss, style_loss)
+                    losses["content"] = (spec["weight"] * content_loss, content_loss)
+                else:
+                    val = fn(spec, model, out, labels)
+                    losses[name] = (spec['weight'] * val, val)
+                
 
-        # --- Reconstruct latent ---
-        z_recon = gamma * z_content + beta          # [B, T, J, D]
+            # --- Total loss ---
+            loss = sum(scaled for (scaled, _) in losses.values())
+            if not torch.isfinite(loss):
+                import pdb; pdb.set_trace()
+                continue
 
-        with torch.no_grad():
-            recon_motion = model.vae.decode(z_recon)  # [B, T, J, V]
+            # --- Backpropagation ---
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            optimizer.step()
 
-        # --- Compute reconstruction loss ---
-        recon_loss = recon_loss_fn(recon_motion, motions)
+            # --- Logging to tqdm ---
+            unique_contents = set(contents)
+            pbar.set_postfix(loss=loss.item(), contents=list(unique_contents))
 
-        # --- Optional: recombination loss ---
-        recomb_loss = 0.0
-        if recombination_loss_fn is not None:
-            B = motions.size(0)
-            perm = torch.randperm(B)
-            gamma_perm = gamma[perm]
-            beta_perm = beta[perm]
-            z_mix = z_content * gamma_perm + beta_perm
+            # --- Total loss ---
+            for name, (scaled, raw) in losses.items():
+                if name not in losses_total:
+                    losses_total[name] = (0.0, 0.0)
+                prev_scaled, prev_raw = losses_total[name]
+                losses_total[name] = (
+                    prev_scaled + scaled.item(),
+                    prev_raw + raw.item()
+                )
 
-            with torch.no_grad():
-                recon_mix = model.vae.decode(z_mix)
-                z_mix_reencoded = model.vae.encode(recon_mix)
+        # --- After each epoch ---
+        num_batches = len(train_loader)
+        loss_total = sum(scaled for (scaled, _) in losses_total.values())
+        avg_train_loss = loss_total / num_batches
+        writer.add_scalar("Train/Total", avg_train_loss, epoch)
 
-            z_style_hat = model.style_net(z_mix_reencoded)
-            mu_hat = z_mix_reencoded.mean(dim=(1, 2), keepdim=True)
-            std_hat = z_mix_reencoded.std(dim=(1, 2), keepdim=True) + 1e-6
-            z_content_hat = (z_mix_reencoded - mu_hat) / std_hat
+        for name, (scaled_sum, raw_sum) in losses_total.items():
+            writer.add_scalar(f"Train/Raw/{name}", raw_sum / num_batches, epoch)
+            writer.add_scalar(f"Train/Scaled/{name}", scaled_sum / num_batches, epoch)
 
-            style_loss = recombination_loss_fn(z_style_hat, z_style[perm].detach())
-            content_loss = recombination_loss_fn(z_content_hat.detach(), z_content.detach())
+        # --- Validation ---
+        valid_sampler.generate_batches()
+        valid_loss = validate(
+            model, valid_loader, device,
+            config=config,
+            loss_cfg=loss_cfg,
+            loss_fns=loss_fns,
+            writer=writer,
+            epoch=epoch
+        )
 
-            recomb_loss = style_loss + content_loss
+        print(f"Epoch {epoch} | Train: {avg_train_loss:.4f} | Valid: {valid_loss:.4f}")
 
-        # --- Combine losses and backprop ---
-        loss = recon_loss + recomb_loss
+        # Evaluation (t-SNE)
+        plot_tsne(model, valid_loader, device, epoch, title="valid", result_dir=config["result_dir"], label_to_name_dict=valid_dataset.label_to_style, writer=writer)
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        # Always save latest
+        os.makedirs(config["checkpoint_dir"], exist_ok=True)
+        torch.save(model.state_dict(), os.path.join(config["checkpoint_dir"], "latest.ckpt"))
 
-        total_loss += loss.item()
-        total_recon += recon_loss.item()
-        total_recomb += recomb_loss.item() if recombination_loss_fn else 0
-
-        if step % log_every == 0:
-            print(f"[Step {step:03d}] Loss: {loss.item():.4f} | Recon: {recon_loss.item():.4f} | Recomb: {recomb_loss:.4f}")
-
-    return {
-        "loss": total_loss / len(dataloader),
-        "recon": total_recon / len(dataloader),
-        "recomb": total_recomb / len(dataloader) if recombination_loss_fn else 0.0
-    }
+        # Save best if validation improves
+        if valid_loss < best_val_loss:
+            best_val_loss = valid_loss
+            print(f"✅ New best model at epoch {epoch} (Val loss: {valid_loss:.4f})")
+            torch.save(model.state_dict(), os.path.join(config["checkpoint_dir"], "best.ckpt"))
+    writer.close()

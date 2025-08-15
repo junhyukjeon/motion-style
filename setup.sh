@@ -1,5 +1,5 @@
 # cp -r ./salad/salad /opt/conda/envs/salad
-cp -r ./env /opt/conda/envs/env
+cp -r ./style /opt/conda/envs/style
 
 apt-get update
 apt-get install ffmpeg

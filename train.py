@@ -1,14 +1,18 @@
 # --- Imports ---
 import argparse
 import colorcet as cc
+import contextlib
 import json
 import matplotlib.pyplot as plt
 import numpy as np
 import os
 import random
+import shutil
+import time
 import torch
 import torch.nn.functional as F
 import yaml
+from collections import defaultdict
 from sklearn.manifold import TSNE
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
@@ -16,65 +20,137 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from matplotlib.colors import to_rgb
 
-# HMMMMMMMM
 from data.dataset import StyleDataset
 from data.sampler import SAMPLER_REGISTRY
 from model.networks import NETWORK_REGISTRY
-from utils.loss import LOSS_REGISTRY
+from utils.train.loss import LOSS_REGISTRY
+from utils.train.loss_scaler import LossScaler
 from utils.plot import plot_tsne
 
-# import pdb; pdb.set_trace()
 
-def validate(model, loader, device, config, loss_cfg, loss_fns, writer=None, epoch=None):
-    model.eval()
-    losses_total = {}
+def compute_raw_losses(loss_fns, loss_cfg, model, out, labels):
+    """
+    Returns: dict[name] = (None, raw_loss_tensor)
+    - Keeps 'style' and 'content' separate if your 'stylecon' fn returns two parts.
+    - No weighting or normalization here.
+    """
+    losses = {}
+    for name, fn in loss_fns.items():
+        spec = loss_cfg[name]
+        if name == "stylecon":
+            style_loss, content_loss = fn(spec, model, out, labels)
+            losses["style"]   = (None, style_loss)
+            losses["content"] = (None, content_loss)
+        else:
+            val = fn(spec, model, out, labels)
+            losses[name] = (None, val)
+    return losses
+
+
+def train(model, loader, device, loss_cfg, loss_fns, scaler, optimizer,
+          writer=None, epoch=None, clip_grad=5.0):
+    """
+    One full epoch of training.
+    Uses LossScaler.normalize_and_weight(..., train=True) to update EMAs and scale losses.
+    Logs Train/Total, Train/Raw/*, Train/Scaled/* averages at epoch end.
+    """
+    model.train()
+    losses_scaled_sum = defaultdict(float)
+    losses_raw_sum    = defaultdict(float)
+
+    pbar = tqdm(loader, desc=f"[Train] Epoch {epoch}")
+    for motions, labels, contents, _ in pbar:
+        motions, labels = motions.to(device), labels.to(device)
+
+        # Forward
+        out = model.encode(motions)
+
+        # 1) raw losses (no weights here)
+        raw_losses = compute_raw_losses(loss_fns, loss_cfg, model, out, labels)
+
+        # 2) normalize + weight via LossScaler (updates EMAs internally)
+        losses, total_loss = scaler.normalize_and_weight(raw_losses, train=True)
+
+        # 3) safety
+        if not torch.isfinite(total_loss):
+            pbar.set_postfix(loss=float("nan"))
+            optimizer.zero_grad(set_to_none=True)
+            continue
+
+        # 4) backward + step
+        optimizer.zero_grad(set_to_none=True)
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_grad)
+        optimizer.step()
+
+        # 5) tqdm
+        unique_contents = set(contents)
+        pbar.set_postfix(loss=total_loss.item(), contents=list(unique_contents))
+
+        # 6) accumulate per-loss sums for epoch averages
+        for name, (scaled, raw) in losses.items():
+            losses_scaled_sum[name] += scaled.item()
+            losses_raw_sum[name]    += raw.item()
+
+    # epoch averages
     num_batches = len(loader)
+    avg_total = sum(losses_scaled_sum.values()) / max(num_batches, 1)
+
+    if writer is not None and epoch is not None:
+        writer.add_scalar("Train/Total", avg_total, epoch)
+        for name in losses_scaled_sum.keys():
+            writer.add_scalar(f"Train/Raw/{name}",    losses_raw_sum[name]    / max(num_batches,1), epoch)
+            writer.add_scalar(f"Train/Scaled/{name}", losses_scaled_sum[name] / max(num_batches,1), epoch)
+
+    return avg_total 
+
+
+def validate(model, loader, device, loss_cfg, loss_fns, scaler,
+             writer=None, epoch=None):
+    """
+    One full validation epoch.
+    Uses LossScaler.normalize_and_weight(..., train=False) → does NOT update EMAs.
+    Logs Valid/Total, Valid/Raw/*, Valid/Scaled/* averages.
+    """
+    model.eval()
+    losses_scaled_sum = defaultdict(float)
+    losses_raw_sum    = defaultdict(float)
 
     with torch.no_grad():
         pbar = tqdm(loader, desc=f"[Valid] Epoch {epoch}")
         for motions, labels, contents, _ in pbar:
             motions, labels = motions.to(device), labels.to(device)
+
+            # Forward
             out = model.encode(motions)
 
-            # --- Loss calculation ---
-            losses = {}
-            for name, fn in loss_fns.items():
-                spec = loss_cfg[name]
-                if name == "stylecon":
-                    style_loss, content_loss = fn(spec, model, out, labels)
-                    losses["style"] = (spec["weight"] * style_loss, style_loss)
-                    losses["content"] = (spec["weight"] * content_loss, content_loss)
-                else:
-                    val = fn(spec, model, out, labels)
-                    losses[name] = (spec["weight"] * val, val)
+            # 1) raw losses
+            raw_losses = compute_raw_losses(loss_fns, loss_cfg, model, out, labels)
 
-            # --- Total loss ---
-            loss = sum(s for (s, _) in losses.values())
-            if not torch.isfinite(loss):
-                print("❌ NaN or Inf detected in loss. Skipping batch.")
+            # 2) normalize + weight via LossScaler (NO EMA updates in val)
+            losses, total_loss = scaler.normalize_and_weight(raw_losses, train=False)
+
+            if not torch.isfinite(total_loss):
+                pbar.set_postfix(loss=float("nan"))
                 continue
 
-            pbar.set_postfix(loss=loss.item())
+            pbar.set_postfix(loss=total_loss.item())
 
+            # 3) accumulate
             for name, (scaled, raw) in losses.items():
-                if name not in losses_total:
-                    losses_total[name] = (0.0, 0.0)
-                prev_scaled, prev_raw = losses_total[name]
-                losses_total[name] = (
-                    prev_scaled + scaled.item(),
-                    prev_raw + raw.item()
-                )
+                losses_scaled_sum[name] += scaled.item()
+                losses_raw_sum[name]    += raw.item()
 
-    # --- Logging ---
-    loss_total = sum(s for (s, _) in losses_total.values())
+    num_batches = len(loader)
+    avg_total = sum(losses_scaled_sum.values()) / max(num_batches, 1)
 
     if writer is not None and epoch is not None:
-        writer.add_scalar("Valid/Total", loss_total / num_batches, epoch)
-        for name, (scaled_sum, raw_sum) in losses_total.items():
-            writer.add_scalar(f"Valid/Raw/{name}", raw_sum / num_batches, epoch)
-            writer.add_scalar(f"Valid/Scaled/{name}", scaled_sum / num_batches, epoch)
+        writer.add_scalar("Valid/Total", avg_total, epoch)
+        for name in losses_scaled_sum.keys():
+            writer.add_scalar(f"Valid/Raw/{name}",    losses_raw_sum[name]    / max(num_batches,1), epoch)
+            writer.add_scalar(f"Valid/Scaled/{name}", losses_scaled_sum[name] / max(num_batches,1), epoch)
 
-    return loss_total / num_batches
+    return avg_total
 
 
 def load_config():
@@ -159,94 +235,59 @@ if __name__ == "__main__":
 
     loss_cfg = config['loss'] 
     loss_fns = {name: LOSS_REGISTRY[name] for name in loss_cfg}
-    
+
     # --- Training ---
+    ALPHA = 0.01
+    NORM_EPS = 1e-8
+    WARMUP_BATCHES = 50
+    scaler = LossScaler(loss_cfg, alpha=ALPHA, eps=NORM_EPS, warmup=WARMUP_BATCHES)
+
     best_val_loss = float('inf')
-    model.train()
     model.encoder.vae.freeze()
 
     for epoch in range(1, config['epochs'] + 1):
         train_sampler.generate_batches()
-        losses_total = {}
-        
-        pbar = tqdm(train_loader, desc=f"[Train] Epoch {epoch}")
-        for motions, labels, contents, _ in pbar:
-            motions, labels = motions.to(device), labels.to(device)
-            out = model.encode(motions)
-
-            import pdb; pdb.set_trace()
-
-            losses = {}
-            for name, fn in loss_fns.items():
-                spec = loss_cfg[name]
-                if name == "stylecon":
-                    style_loss, content_loss = fn(spec, model, out, labels)
-                    losses["style"] = (spec["weight"] * style_loss, style_loss)
-                    losses["content"] = (spec["weight"] * content_loss, content_loss)
-                else:
-                    val = fn(spec, model, out, labels)
-                    losses[name] = (spec['weight'] * val, val)
-                
-
-            # --- Total loss ---
-            loss = sum(scaled for (scaled, _) in losses.values())
-            if not torch.isfinite(loss):
-                import pdb; pdb.set_trace()
-                continue
-
-            # --- Backpropagation ---
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-            optimizer.step()
-
-            # --- Logging to tqdm ---
-            unique_contents = set(contents)
-            pbar.set_postfix(loss=loss.item(), contents=list(unique_contents))
-
-            # --- Total loss ---
-            for name, (scaled, raw) in losses.items():
-                if name not in losses_total:
-                    losses_total[name] = (0.0, 0.0)
-                prev_scaled, prev_raw = losses_total[name]
-                losses_total[name] = (
-                    prev_scaled + scaled.item(),
-                    prev_raw + raw.item()
-                )
-
-        # --- After each epoch ---
-        num_batches = len(train_loader)
-        loss_total = sum(scaled for (scaled, _) in losses_total.values())
-        avg_train_loss = loss_total / num_batches
-        writer.add_scalar("Train/Total", avg_train_loss, epoch)
-
-        for name, (scaled_sum, raw_sum) in losses_total.items():
-            writer.add_scalar(f"Train/Raw/{name}", raw_sum / num_batches, epoch)
-            writer.add_scalar(f"Train/Scaled/{name}", scaled_sum / num_batches, epoch)
-
-        # --- Validation ---
         valid_sampler.generate_batches()
-        valid_loss = validate(
-            model, valid_loader, device,
-            config=config,
+
+        # --- Train ---
+        avg_train_loss = train(
+            model=model,
+            loader=train_loader,
+            device=device,
             loss_cfg=loss_cfg,
             loss_fns=loss_fns,
+            scaler=scaler,
+            optimizer=optimizer,
+            writer=writer,
+            epoch=epoch,
+            clip_grad=5.0,
+        )
+
+        # --- Validate ---
+        valid_loss = validate(
+            model=model,
+            loader=valid_loader,
+            device=device,
+            loss_cfg=loss_cfg,
+            loss_fns=loss_fns,
+            scaler=scaler,
             writer=writer,
             epoch=epoch
         )
 
         print(f"Epoch {epoch} | Train: {avg_train_loss:.4f} | Valid: {valid_loss:.4f}")
+        model.train()
 
-        # Evaluation (t-SNE)
-        plot_tsne(model, valid_loader, device, epoch, title="valid", result_dir=config["result_dir"], label_to_name_dict=valid_dataset.label_to_style, writer=writer)
+        # --- t-SNE, checkpoints, best model ---
+        plot_tsne(model, valid_loader, device, epoch, title="valid",
+                result_dir=config["result_dir"],
+                label_to_name_dict=valid_dataset.label_to_style,
+                writer=writer)
 
-        # Always save latest
         os.makedirs(config["checkpoint_dir"], exist_ok=True)
         torch.save(model.state_dict(), os.path.join(config["checkpoint_dir"], "latest.ckpt"))
 
-        # Save best if validation improves
         if valid_loss < best_val_loss:
             best_val_loss = valid_loss
             print(f"✅ New best model at epoch {epoch} (Val loss: {valid_loss:.4f})")
             torch.save(model.state_dict(), os.path.join(config["checkpoint_dir"], "best.ckpt"))
-    writer.close()

@@ -109,10 +109,9 @@ if __name__ == "__main__":
 
         with torch.no_grad():
             out = model.encode(motions)
-            gamma = out["gamma"]
-            beta = out["beta"]
+            z_style = out["z_style"]
             z_content = out["z_content"]
-            z_new = model.decode(gamma * z_content + beta)
+            z_new = model.decode(z_style, z_content)
             motions_recon = model.encoder.vae.decode(z_new)  # [B, T, J, D]
 
         motions_recon = motions_recon * std + mean

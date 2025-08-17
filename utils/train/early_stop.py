@@ -1,24 +1,16 @@
-from dataclasses import dataclass
-
-@dataclass
-class EarlyStopperConfig:
-    patience: int = 10        # epochs with no improvement before stop
-    min_delta: float = 0.0    # required improvement over best to reset patience
-    mode: str = "min"         # "min" for loss, "max" for accuracy, etc.
-
 class EarlyStopper:
-    def __init__(self, cfg: EarlyStopperConfig):
-        assert cfg.mode in ("min", "max")
+    def __init__(self, cfg):
+        assert cfg['mode'] in ("min", "max")
         self.cfg = cfg
-        self.best = float("inf") if cfg.mode == "min" else -float("inf")
+        self.best = float("inf") if cfg['mode'] == "min" else -float("inf")
         self.bad_epochs = 0
         self.best_epoch = -1
 
     def is_improvement(self, metric: float) -> bool:
-        if self.cfg.mode == "min":
-            return metric < (self.best - self.cfg.min_delta)
+        if self.cfg['mode'] == "min":
+            return metric < (self.best - self.cfg['min_delta'])
         else:
-            return metric > (self.best + self.cfg.min_delta)
+            return metric > (self.best + self.cfg['min_delta'])
 
     def step(self, metric: float, epoch: int) -> bool:
         """
@@ -32,4 +24,4 @@ class EarlyStopper:
             return False  # do not stop
         else:
             self.bad_epochs += 1
-            return self.bad_epochs > self.cfg.patience  # stop if strictly greater
+            return self.bad_epochs > self.cfg['patience']  # stop if strictly greater

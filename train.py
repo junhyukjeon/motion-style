@@ -23,6 +23,7 @@ from matplotlib.colors import to_rgb
 from data.dataset import StyleDataset
 from data.sampler import SAMPLER_REGISTRY
 from model.networks import NETWORK_REGISTRY
+from utils.train.early_stop import EarlyStopper
 from utils.train.loss import LOSS_REGISTRY
 from utils.train.loss_scaler import LossScaler
 from utils.plot import plot_tsne
@@ -94,15 +95,17 @@ def train(model, loader, device, loss_cfg, loss_fns, scaler, optimizer,
 
     # epoch averages
     num_batches = len(loader)
-    avg_total = sum(losses_scaled_sum.values()) / max(num_batches, 1)
+    train_total_scaled = sum(losses_scaled_sum.values()) / max(num_batches, 1)
+    train_total_raw = sum(losses_raw_sum.values()) / max(num_batches, 1)
 
     if writer is not None and epoch is not None:
-        writer.add_scalar("Train/Total", avg_total, epoch)
+        writer.add_scalar("Train/Raw/Total", train_total_raw, epoch)
+        writer.add_scalar("Train/Scaled/Total", train_total_scaled, epoch)
         for name in losses_scaled_sum.keys():
             writer.add_scalar(f"Train/Raw/{name}",    losses_raw_sum[name]    / max(num_batches,1), epoch)
             writer.add_scalar(f"Train/Scaled/{name}", losses_scaled_sum[name] / max(num_batches,1), epoch)
 
-    return avg_total 
+    return train_total_scaled, train_total_raw
 
 
 def validate(model, loader, device, loss_cfg, loss_fns, scaler,
@@ -120,37 +123,32 @@ def validate(model, loader, device, loss_cfg, loss_fns, scaler,
         pbar = tqdm(loader, desc=f"[Valid] Epoch {epoch}")
         for motions, labels, contents, _ in pbar:
             motions, labels = motions.to(device), labels.to(device)
-
-            # Forward
             out = model.encode(motions)
 
-            # 1) raw losses
-            raw_losses = compute_raw_losses(loss_fns, loss_cfg, model, out, labels)
-
-            # 2) normalize + weight via LossScaler (NO EMA updates in val)
-            losses, total_loss = scaler.normalize_and_weight(raw_losses, train=False)
+            raw_losses = compute_raw_losses(loss_fns, loss_cfg, model, out, labels) # Pure raw loss values. Check loss functions.
+            losses, total_loss = scaler.normalize_and_weight(raw_losses, train=False) # Normalized and weighted losses, and sum.
 
             if not torch.isfinite(total_loss):
                 pbar.set_postfix(loss=float("nan"))
                 continue
 
             pbar.set_postfix(loss=total_loss.item())
-
-            # 3) accumulate
             for name, (scaled, raw) in losses.items():
                 losses_scaled_sum[name] += scaled.item()
                 losses_raw_sum[name]    += raw.item()
 
     num_batches = len(loader)
-    avg_total = sum(losses_scaled_sum.values()) / max(num_batches, 1)
+    valid_total_scaled = sum(losses_scaled_sum.values()) / max(num_batches, 1)
+    valid_total_raw = sum(losses_raw_sum.values()) / max(num_batches, 1)
 
     if writer is not None and epoch is not None:
-        writer.add_scalar("Valid/Total", avg_total, epoch)
+        writer.add_scalar("Valid/Raw/Total", valid_total_raw, epoch)
+        writer.add_scalar("Valid/Scaled/Total", valid_total_scaled, epoch)
         for name in losses_scaled_sum.keys():
             writer.add_scalar(f"Valid/Raw/{name}",    losses_raw_sum[name]    / max(num_batches,1), epoch)
             writer.add_scalar(f"Valid/Scaled/{name}", losses_scaled_sum[name] / max(num_batches,1), epoch)
 
-    return avg_total
+    return valid_total_scaled, valid_total_raw
 
 
 def load_config():
@@ -236,6 +234,10 @@ if __name__ == "__main__":
     loss_cfg = config['loss'] 
     loss_fns = {name: LOSS_REGISTRY[name] for name in loss_cfg}
 
+    # --- Early Stopper ---
+    early_cfg = config['early']
+    early = EarlyStopper(early_cfg)
+
     # --- Training ---
     ALPHA = 0.01
     NORM_EPS = 1e-8
@@ -250,7 +252,7 @@ if __name__ == "__main__":
         valid_sampler.generate_batches()
 
         # --- Train ---
-        avg_train_loss = train(
+        train_scaled, train_raw = train(
             model=model,
             loader=train_loader,
             device=device,
@@ -264,7 +266,7 @@ if __name__ == "__main__":
         )
 
         # --- Validate ---
-        valid_loss = validate(
+        valid_scaled, valid_task = validate(   # valid_task = raw-weighted total
             model=model,
             loader=valid_loader,
             device=device,
@@ -275,19 +277,35 @@ if __name__ == "__main__":
             epoch=epoch
         )
 
-        print(f"Epoch {epoch} | Train: {avg_train_loss:.4f} | Valid: {valid_loss:.4f}")
-        model.train()
+        print(
+            f"Epoch {epoch} | "
+            f"Train scaled: {train_scaled:.4f} | Train raw: {train_raw:.4f} | "
+            f"Valid scaled: {valid_scaled:.4f} | Valid raw: {valid_task:.4f}"
+        )
+        model.train()  # ensure we’re back in train mode
 
         # --- t-SNE, checkpoints, best model ---
-        plot_tsne(model, valid_loader, device, epoch, title="valid",
-                result_dir=config["result_dir"],
-                label_to_name_dict=valid_dataset.label_to_style,
-                writer=writer)
+        plot_tsne(
+            model, valid_loader, device, epoch, title="valid",
+            result_dir=config["result_dir"],
+            label_to_name_dict=valid_dataset.label_to_style,
+            writer=writer
+        )
 
         os.makedirs(config["checkpoint_dir"], exist_ok=True)
         torch.save(model.state_dict(), os.path.join(config["checkpoint_dir"], "latest.ckpt"))
 
-        if valid_loss < best_val_loss:
-            best_val_loss = valid_loss
-            print(f"✅ New best model at epoch {epoch} (Val loss: {valid_loss:.4f})")
+        # Save best and early stop on the task metric
+        if early.is_improvement(valid_task):
+            print(f"✅ New best at epoch {epoch} (Val task: {valid_task:.4f})")
             torch.save(model.state_dict(), os.path.join(config["checkpoint_dir"], "best.ckpt"))
+
+        if early.step(valid_task, epoch):
+            print(f"⏹️ Early stopping at epoch {epoch} "
+                f"(best task={early.best:.4f} at epoch {early.best_epoch})")
+            break
+
+        # if valid_loss < best_val_loss:
+        #     best_val_loss = valid_loss
+        #     print(f"✅ New best model at epoch {epoch} (Val loss: {valid_loss:.4f})")
+        #     torch.save(model.state_dict(), os.path.join(config["checkpoint_dir"], "best.ckpt"))

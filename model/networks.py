@@ -610,6 +610,38 @@ class StyleContentEncoderFour(nn.Module):
             "z_style":   z_style,
             "z_content": z_content,
         }
+
+    def forward_from_latent(self, z_latent: torch.Tensor):
+        """
+        Args:
+            z_latent: [B, T, J, D_vae] latent tokens from a VAE.encode(...) call.
+    
+        Returns:
+            dict with:
+              - "z_latent":  [B, T, J, D_vae]  (echoed input)
+              - "z_style":   [B, D_style]
+              - "z_content": [B, T, J, D_vae]
+        """
+        # ensure device & dim match
+        if z_latent.device != self.device:
+            z_latent = z_latent.to(self.device)
+        assert z_latent.size(-1) == self.vae_dim, \
+            f"Expected z_latent last dim {self.vae_dim}, got {z_latent.size(-1)}"
+    
+        # Style: token MLP then mean-pool over (T, J)
+        style_tokens = self.style_mlp(z_latent)        # [B, T, J, D_style]
+        z_style = style_tokens.mean(dim=(1, 2))        # [B, D_style]
+    
+        # Content: per-sample normalization in VAE space
+        mu  = z_latent.mean(dim=(1, 2), keepdim=True)  # [B,1,1,D_vae]
+        std = z_latent.std(dim=(1, 2), keepdim=True) + 1e-6
+        z_content = (z_latent - mu) / std              # [B, T, J, D_vae]
+    
+        return {
+            "z_latent":  z_latent,
+            "z_style":   z_style,
+            "z_content": z_content,
+        }
     
 
 class StyleContentDecoderFour(nn.Module):

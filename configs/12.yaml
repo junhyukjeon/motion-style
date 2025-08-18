@@ -11,6 +11,7 @@ std_path: ./checkpoints/t2m/Comp_v6_KLD005/meta/std.npy
 style_json: ./dataset/100style/100style_clean_clean.json
 content_json: ./dataset/100style/10content_clean_clean.json
 window_size: 128
+valid_size: 19
 
 # --- Sampler Settings --- #
 sampler:
@@ -19,13 +20,13 @@ sampler:
   samples_per_class: 8
 
 # --- Training Hyperparameters --- #
-epochs: 50
+epochs: 100
 lr: 0.001
 
 # --- Losses --- #
 loss:
   recon:
-    weight: 1.0
+    weight: 100.0
   supcon:
     weight: 1.0
     anchor: true
@@ -33,8 +34,6 @@ loss:
   stylecon:
     weight: 1.0
   anchor:
-    weight: 1.0
-  orthogonality:
     weight: 1.0
 
 # --- Model --- #
@@ -53,9 +52,8 @@ model:
     dropout: 0.1
     n_layers: 2
 
-
 # --- Early Stopper --- #
 early:
-  patience: 5
+  patience: 10
   min_delta: 0.0
   mode: min

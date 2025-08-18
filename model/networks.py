@@ -71,55 +71,6 @@ class StyleNet(nn.Module):
         return style
 
 
-class StyleTransformerTwo(nn.Module):
-    def __init__(self, config, vae_dim):
-        super().__init__()
-
-        self.latent_dim = config['latent_dim']
-
-        # Projection from VAE dim to transformer latent dim
-        self.project = nn.Sequential(
-            nn.Linear(vae_dim, self.latent_dim),
-            nn.ReLU(),
-            nn.Linear(self.latent_dim, self.latent_dim),
-        )
-
-        # Learnable query style embedding
-        self.query_style = nn.Parameter(torch.randn(1, 1, self.latent_dim))
-        self.query_content = nn.Parameter(torch.randn(1, 1, self.latent_dim))
-
-        self.blocks = nn.ModuleList([
-            EncoderBlock(config['latent_dim'], config['n_heads'], config['dropout'])
-            for _ in range(config["n_layers"])
-        ])
-
-        # Final projection
-        self.fc_style = nn.Sequential(
-            nn.LayerNorm(self.latent_dim),
-            nn.Linear(self.latent_dim, self.latent_dim)
-        )
-
-        self.fc_content = nn.Sequential(
-            nn.LayerNorm(self.latent_dim),
-            nn.Linear(self.latent_dim, self.latent_dim)
-        )
-
-    def forward(self, x):
-        B, T, J, _ = x.shape
-        x = self.project(x).view(B, T * J, self.latent_dim)
-
-        q_s = self.query_style.expand(B, -1, -1)
-        q_c = self.query_content.expand(B, -1, -1)
-
-        for block in self.blocks:
-            q_s = block(q_s, x)
-            q_c = block(q_c, x)
-
-        style = self.fc_style(q_s.squeeze(1))
-        content = self.fc_content(q_c.squeeze(1))
-        return style, content
-
-
 class StyleNetMLP(nn.Module):
     def __init__(self, config, vae_dim):
         super().__init__()
@@ -161,6 +112,55 @@ class BetaNet(nn.Module):
 
     def forward(self, style_embedding):
         return self.net(style_embedding)
+
+
+class CoAttnRefine(nn.Module):
+    def __init__(self, dim, n_heads=4, dropout=0.1, n_style_mem=4):
+        super().__init__()
+        self.n_style_mem = n_style_mem
+        self.to_mem = nn.Linear(dim, n_style_mem * dim)  # expand z_style -> M vectors
+
+        # content-aware style
+        self.cas_attn = MultiheadAttention(dim, n_heads, dropout, batch_first=True)
+        self.cas_ln1  = nn.LayerNorm(dim); self.cas_ff = nn.Sequential(
+            nn.Linear(dim, dim), nn.GELU(), nn.Dropout(dropout), nn.Linear(dim, dim)
+        )
+        self.cas_ln2  = nn.LayerNorm(dim)
+
+        # style-aware content
+        self.sac_attn = MultiheadAttention(dim, n_heads, dropout, batch_first=True)
+        self.sac_ln1  = nn.LayerNorm(dim); self.sac_ff = nn.Sequential(
+            nn.Linear(dim, dim), nn.GELU(), nn.Dropout(dropout), nn.Linear(dim, dim)
+        )
+        self.sac_ln2  = nn.LayerNorm(dim)
+
+    def forward(self, z_style, z_content, detach_tokens=True, detach_style=True):
+        """
+        z_style:   [B, D]
+        z_content: [B, T, J, D]
+        returns: z_style_refined [B, D], z_content_refined [B, T, J, D]
+        """
+        B, T, J, D = z_content.shape
+        tokens = z_content.view(B, T*J, D)
+
+        # ----- (1) Content-aware style -----
+        k = v = tokens.detach() if detach_tokens else tokens
+        q = z_style.unsqueeze(1)                          # [B,1,D]
+        out, _ = self.cas_attn(q, k, v)                   # [B,1,D]
+        x = self.cas_ln1(q + out)
+        x = self.cas_ln2(x + self.cas_ff(x))
+        z_style_refined = x.squeeze(1)                    # [B,D]
+
+        # ----- (2) Style-aware content -----
+        mem = self.to_mem(z_style_refined).view(B, self.n_style_mem, D)
+        mem = mem / (mem.norm(dim=-1, keepdim=True) + 1e-6)
+        k = v = mem.detach() if detach_style else mem
+        out, _ = self.sac_attn(tokens, k, v)              # [B,N,D]
+        y = self.sac_ln1(tokens + out)
+        y = self.sac_ln2(y + self.sac_ff(y))
+        z_content_refined = y.view(B, T, J, D)            # [B,T,J,D]
+
+        return z_style_refined, z_content_refined
     
 
 # --- Style Content Encoder --- #
@@ -289,6 +289,113 @@ class StyleContentEncoderTwo(nn.Module):
             'z_content' : z_content
         }
 
+
+class StyleContentEncoderThree(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        self.vae_opt = get_opt(f"checkpoints/t2m/t2m_vae_gelu/opt.txt", self.device)
+
+        # --- Frozen VAE encoder ---
+        self.vae = load_vae(self.vae_opt).to(self.device)
+        self.vae.eval().requires_grad_(False)
+
+        # --- Dims ---
+        self.vae_dim    = self.vae_opt.latent_dim
+        self.latent_dim = config["latent_dim"]
+
+        # --- Style path: token projection (vae_dim -> latent_dim) ---
+        self.project_style = nn.Sequential(
+            nn.Linear(self.vae_dim, self.latent_dim),
+            nn.ReLU(),
+            nn.Linear(self.latent_dim, self.latent_dim),
+        )
+
+        # --- Learnable style query ---
+        self.query = nn.Parameter(torch.randn(1, 1, self.latent_dim) * 0.02)
+
+        # --- Cross-attention blocks (StyleNet-like) ---
+        self.blocks = nn.ModuleList([
+            EncoderBlock(self.latent_dim, config["n_heads"], config["dropout"])
+            for _ in range(config["n_layers"])
+        ])
+
+        # --- Style head ---
+        self.fc_style = nn.Sequential(
+            nn.LayerNorm(self.latent_dim),
+            nn.Linear(self.latent_dim, self.latent_dim),
+        )
+
+        # --- Content path: per-token MLP (vae_dim -> latent_dim), no pooling ---
+        self.content_mlp = nn.Sequential(
+            nn.Linear(self.vae_dim, self.latent_dim),
+            nn.ReLU(),
+            nn.Linear(self.latent_dim, self.latent_dim),
+        )
+
+        # --- ---
+        self.coattn = CoAttnRefine(self.latent_dim,
+                            n_heads=config["n_heads"],
+                            dropout=config["dropout"],
+                            n_style_mem=config.get("n_style_mem", 4))
+
+    @torch.no_grad()
+    def _encode_with_vae(self, motion):
+        # motion -> z_latent [B, T, J, D_vae]
+        z_latent, _ = self.vae.encode(motion)
+        return z_latent
+
+    def forward(self, motion):
+        """
+        Returns:
+          z_latent:  [B, T, J, D_vae]
+          z_style:   [B, D]
+          z_content: [B, T, J, D]
+        """
+        with torch.no_grad():
+            z_latent, _ = self.vae.encode(motion)  # [B, T, J, D_vae]
+
+        z_style   = self._style_from_latent(z_latent)     # [B, D]
+        z_content = self._content_from_latent(z_latent)   # [B, T, J, D]
+
+        return {
+            "z_latent":  z_latent,
+            "z_style":   z_style,
+            "z_content": z_content,
+        }
+
+    def forward_from_latent(self, z_latent):
+        """
+        z_latent: [B, T, J, D_vae]
+        """
+        z_style   = self._style_from_latent(z_latent)     # [B, D]
+        z_content = self._content_from_latent(z_latent)   # [B, T, J, D]
+        
+        # one refinement step (style first, then content)
+        z_style, z_content = self.coattn(
+            z_style, z_content,
+            detach_tokens=True,   # safe: content won't shift while updating style
+            detach_style=True     # safe: style won't shift while updating content
+        )
+        return {"z_latent": z_latent, "z_style": z_style, "z_content": z_content}
+
+    # ----- internals -----
+
+    def _style_from_latent(self, z_latent):
+        B, T, J, _ = z_latent.shape
+        tokens = self.project_style(z_latent).reshape(B, T * J, self.latent_dim)  # [B, N, D]
+        q = self.query.expand(B, 1, -1)  # [B, 1, D]
+        for blk in self.blocks:
+            q = blk(q, tokens)
+        z_style = self.fc_style(q.squeeze(1))  # [B, D]
+        return z_style
+
+    def _content_from_latent(self, z_latent):
+        # Per-token projection; preserve [T, J]
+        x = self.content_mlp(z_latent)  # [B, T, J, D]
+        return x
+
+
 # --- Style Content Decoder --- #
 class StyleContentDecoder(nn.Module):
     def __init__(self, config):
@@ -398,6 +505,75 @@ class StyleContentDecoderTwo(nn.Module):
         return x_rec
 
 
+class StyleContentDecoderThree(nn.Module):
+    """
+    Inputs:
+      z_style:   [B, D]           (global style embedding in latent_dim)
+      z_content: [B, T, J, D]     (content tokens in latent_dim)
+    Output:
+      x_rec:     [B, T, J, D_vae] (to match your VAE latent space)
+    """
+    def __init__(self, config):
+        super().__init__()
+        self.device       = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        self.vae_opt      = get_opt("checkpoints/t2m/t2m_vae_gelu/opt.txt", self.device)
+        self.vae_dim      = self.vae_opt.latent_dim
+
+        self.latent_dim   = config["latent_dim"]
+        self.n_layers     = config["n_layers"]
+        self.n_heads      = config["n_heads"]
+        self.dropout      = config["dropout"]
+        self.n_style_mem  = config.get("n_style_mem", 4)   # M >= 4 recommended
+        self.detach_style = config.get("detach_style", True)
+
+        # Content tokens are already in latent_dim; keep an identity in case you change later
+        self.proj_in = nn.Identity()
+
+        # Positional embedding over flattened (T*J)
+        self.pos_embed = PositionalEmbedding(self.latent_dim, self.dropout)
+
+        # Expand global style vector -> M memory vectors for K/V
+        self.style_mem = nn.Linear(self.latent_dim, self.n_style_mem * self.latent_dim)
+
+        # Stack of your DecoderBlock (cross-attn to style memory inside)
+        self.blocks = nn.ModuleList([
+            DecoderBlock(self.latent_dim, self.n_heads, self.dropout)
+            for _ in range(self.n_layers)
+        ])
+
+        # Project back to VAE latent dimension
+        self.out_proj = nn.Sequential(
+            nn.LayerNorm(self.latent_dim),
+            nn.Linear(self.latent_dim, self.vae_dim),
+        )
+
+    def forward(self, z_style, z_content):
+        """
+        z_style:   [B, D]
+        z_content: [B, T, J, D]
+        """
+        B, T, J, D = z_content.shape
+        assert D == self.latent_dim, f"z_content last dim {D} != latent_dim {self.latent_dim}"
+
+        # Flatten content to tokens and add positional info
+        q = self.proj_in(z_content).view(B, T * J, D)  # [B, N, D], N=T*J
+        q = self.pos_embed(q)
+
+        # Build multi-vector style memory for context (K/V)
+        ctx = self.style_mem(z_style).view(B, self.n_style_mem, D)   # [B, M, D]
+        ctx = ctx / (ctx.norm(dim=-1, keepdim=True) + 1e-6)          # L2-normalize per mem vector
+        if self.detach_style:
+            ctx = ctx.detach()
+
+        # Run your DecoderBlocks with cross-attn to style memory
+        for blk in self.blocks:
+            q = blk(q, ctx)  # your block: attn(Q=q, K=ctx, V=ctx) + FFN
+
+        # Project to VAE latent dim and reshape back to [B, T, J, D_vae]
+        out = self.out_proj(q).view(B, T, J, self.vae_dim)
+        return out
+
+
 # --- 
 class StyleContentNet(nn.Module):
     def __init__(self, config):
@@ -421,118 +597,7 @@ NETWORK_REGISTRY = {
     "StyleContentEncoder": StyleContentEncoder,
     "StyleContentNet": StyleContentNet,
     "StyleContentEncoderTwo": StyleContentEncoderTwo,
-    "StyleContentDecoderTwo": StyleContentDecoderTwo
+    "StyleContentEncoderThree": StyleContentEncoderThree,
+    "StyleContentDecoderTwo": StyleContentDecoderTwo,
+    "StyleContentDecoderThree": StyleContentDecoderThree,
 }
-
-
-# --- Style Content Model --- #
-
-# # --- Content Encoder --- #
-# class ContentBlock(nn.Module):
-#     def __init__(self, latent_dim, n_heads, dropout):
-#         super().__init__()
-#         self.attn = MultiheadAttention(latent_dim, n_heads, dropout, batch_first=True)
-#         self.norm1 = nn.LayerNorm(latent_dim)
-#         self.ffn = nn.Sequential(
-#             nn.Linear(latent_dim, latent_dim),
-#             nn.ReLU(),
-#             nn.Dropout(dropout),
-#             nn.Linear(latent_dim, latent_dim)
-#         )
-#         self.norm2 = nn.LayerNorm(latent_dim)
-#         self.dropout = nn.Dropout(dropout)
-
-#     def forward(self, x):
-#         residual = x
-#         x_attn, _ = self.attn(x, x, x)
-#         x = self.norm1(residual + self.dropout(x_attn))
-
-#         residual = x
-#         x = self.norm2(residual + self.dropout(self.ffn(x)))
-#         return x
-
-
-# class ContentEncoder(nn.Module):
-#     def __init__(self, config, vae_dim):
-#         super().__init__()
-#         self.latent_dim = config['latent_dim']
-#         self.project = nn.Sequential(
-#             nn.Linear(vae_dim, self.latent_dim),
-#             nn.ReLU(),
-#             nn.Linear(self.latent_dim, self.latent_dim)
-#         )
-#         self.pos_embed = PositionalEmbedding(self.latent_dim, config["dropout"])
-#         self.blocks = nn.ModuleList([
-#             ContentBlock(self.latent_dim, config["n_heads"], config["dropout"])
-#             for _ in range(config["n_layers"])
-#         ])
-
-#     def forward(self, x):
-#         B, T, J, _ = x.shape
-#         x = self.project(x)                   # [B, T, J, latent_dim]
-#         x = x.view(B, T * J, self.latent_dim) # [B, T * J, latent_dim]
-#         x = self.pos_embed(x)                 # Add positional encoding based on index
-#         for block in self.blocks:             # Self-attention
-#             x = block(x)
-#         x = x.view(B, T, J, self.latent_dim)  # [B, T, J, latent_dim]
-#         return x
-
-
-# # --- StyleInjectionModule ---
-# class StyleInjectionBlock(nn.Module):
-#     def __init__(self, latent_dim, n_heads, dropout):
-#         super().__init__()
-#         self.attn = MultiheadAttention(latent_dim, n_heads, dropout, batch_first=True)
-#         self.norm1 = nn.LayerNorm(latent_dim)
-#         self.ffn = nn.Sequential(
-#             nn.Linear(latent_dim, latent_dim),
-#             nn.ReLU(),
-#             nn.Dropout(dropout),
-#             nn.Linear(latent_dim, latent_dim)
-#         )
-#         self.norm2 = nn.LayerNorm(latent_dim)
-#         self.dropout = nn.Dropout(dropout)
-
-#     def forward(self, content, style):
-#         residual = content
-#         attn_output, _ = self.attn(content, style, style)
-#         x = self.norm1(residual + self.dropout(attn_output))
-
-#         residual = x
-#         x = self.norm2(residual + self.dropout(self.ffn(x)))
-#         return x
-
-
-# class StyleInjectionModule(nn.Module):
-#     def __init__(self, *, config, vae_dim):
-#         super().__init__()
-#         self.blocks = nn.ModuleList([
-#             StyleInjectionBlock(config['latent_dim'], config["n_heads"], config["dropout"])
-#             for _ in range(config["n_layers"])
-#         ])
-#         self.project = nn.Linear(config['latent_dim'], vae_dim)
-
-#     def forward(self, content, style):
-#         B, T, J, D = content.shape
-#         x = content.view(B, T * J, D) # [B, T * J, D]
-#         style = style.unsqueeze(1)    # [B, 1, D]
-#         for block in self.blocks:     # Cross-attention
-#             x = block(x, style)
-
-#         x = x.view(B, T, J, D)        # [B, T, J, D]
-#         x = self.project(x)           # [B, T, J, vae_dim]
-#         return x
-
-# class StyleEncoder(nn.Module):
-#     def __init__(self, input_dim=32, hidden_dim=128, output_dim=32):
-#         super().__init__()
-#         self.net = nn.Sequential(
-#             nn.Linear(input_dim, hidden_dim),
-#             nn.ReLU(),
-#             nn.Linear(hidden_dim, hidden_dim),
-#             nn.ReLU(),
-#             nn.Linear(hidden_dim, output_dim)
-#         )
-
-#     def forward(self, x):
-#         return self.net(x)

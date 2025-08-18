@@ -48,7 +48,13 @@ def compute_raw_losses(loss_fns, loss_cfg, model, out, labels):
     return losses
 
 
-def train(model, loader, device, loss_cfg, loss_fns, scaler, optimizer, writer=None, epoch=None, clip_grad=5.0):
+def train(model, loader, device, loss_cfg, loss_fns, scaler, optimizer,
+          writer=None, epoch=None, clip_grad=5.0):
+    """
+    One full epoch of training.
+    Uses LossScaler.normalize_and_weight(..., train=True) to update EMAs and scale losses.
+    Logs Train/Total, Train/Raw/*, Train/Scaled/* averages at epoch end.
+    """
     model.train()
     losses_scaled_sum = defaultdict(float)
     losses_raw_sum    = defaultdict(float)
@@ -106,7 +112,13 @@ def train(model, loader, device, loss_cfg, loss_fns, scaler, optimizer, writer=N
     return train_total_scaled, train_total_raw
 
 
-def validate(model, loader, device, loss_cfg, loss_fns, scaler, writer=None, epoch=None):
+def validate(model, loader, device, loss_cfg, loss_fns, scaler,
+             writer=None, epoch=None):
+    """
+    One full validation epoch.
+    Uses LossScaler.normalize_and_weight(..., train=False) → does NOT update EMAs.
+    Logs Valid/Total, Valid/Raw/*, Valid/Scaled/* averages.
+    """
     model.eval()
     losses_scaled_sum = defaultdict(float)
     losses_raw_sum    = defaultdict(float)
@@ -200,7 +212,7 @@ if __name__ == "__main__":
     valid_styles.append("Neutral")
 
     train_label_to_ids = {style: full_label_to_ids[style] for style in train_styles}
-    valid_label_to_ids = {style: full_label_to_ids[style] for style in valid_styles}
+    valid_label_to_ids = {style: full_label_to_ids[style] for style in train_styles}
 
     # --- Content Mapping ---
     with open(config["content_json"]) as f:
@@ -241,7 +253,7 @@ if __name__ == "__main__":
     scaler = LossScaler(loss_cfg, alpha=ALPHA, eps=NORM_EPS, warmup=WARMUP_BATCHES)
 
     #####################
-    MAX_TRAIN_BATCHES = 10000000
+    MAX_TRAIN_BATCHES = 1250
 
     best_val_loss = float('inf')
     model.encoder.vae.freeze()

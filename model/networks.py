@@ -574,6 +574,117 @@ class StyleContentDecoderThree(nn.Module):
         return out
 
 
+class StyleContentEncoderFour(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.device  = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        self.vae_opt = get_opt("checkpoints/t2m/t2m_vae_gelu/opt.txt", self.device)
+
+        self.vae = load_vae(self.vae_opt).to(self.device)
+        self.style_net = StyleNetMLP(self.vae_opt.latent_dim)
+
+    def forward(self, motion):
+        with torch.no_grad():
+            z_latent, _ = self.vae.encode(motion)
+
+        z_style = self.style_net(z_latent)
+
+        mu  = z_latent.mean(dim=(1, 2), keepdim=True)
+        std = z_latent.std(dim=(1, 2), keepdim=True) + 1e-6
+        z_content = (z_latent - mu) / std
+
+        gamma = self.gamma_net(z_style)[:, None, None, :]
+        beta  = self.beta_net(z_style)[:, None, None, :]
+
+        return {
+            "z_latent":  z_latent,    # raw VAE tokens
+            "z_style":   z_style,     # global style vector (latent_dim)
+        }
+    
+
+class StyleContentDecoderFour(nn.Module):
+    """
+    - Accepts z_style [B, D_latent], z_content [B, T, J, D_vae] (normalized tokens)
+    - Internally computes gamma/beta from z_style (GammaNet/BetaNet), applies FiLM:
+          z_new = (1 + tanh(gamma)) * z_content + beta
+      (tanh on gamma to keep modulation stable)
+    - Then maps tokens back to VAE latent dimension (optionally with a light Transformer)
+    """
+    def __init__(self, config):
+        super().__init__()
+        self.device  = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        self.vae_opt = get_opt("checkpoints/t2m/t2m_vae_gelu/opt.txt", self.device)
+        self.vae_dim = self.vae_opt.latent_dim
+
+        # expected dims
+        self.latent_dim = config["latent_dim"]           # dim of z_style
+        self.n_layers   = config.get("n_layers", 0)      # optional light stack
+        self.n_heads    = config.get("n_heads", 4)
+        self.dropout    = config.get("dropout", 0.1)
+
+        # FiLM heads (inside decoder to keep API consistent)
+        self.gamma_net = NETWORK_REGISTRY[config["gamma_net"]["type"]](
+            config["gamma_net"], self.vae_dim
+        )
+        self.beta_net  = NETWORK_REGISTRY[config["beta_net"]["type"]](
+            config["beta_net"],  self.vae_dim
+        )
+
+        # Optional lightweight token refiner in VAE space after FiLM
+        # If n_layers == 0, we just run a residual MLP.
+        if self.n_layers > 0:
+            self.token_proj = nn.Linear(self.vae_dim, self.latent_dim)
+            self.pos_embed  = PositionalEmbedding(self.latent_dim, self.dropout)
+            self.blocks = nn.ModuleList([
+                DecoderBlock(self.latent_dim, self.n_heads, self.dropout)
+                for _ in range(self.n_layers)
+            ])
+            self.out_proj = nn.Sequential(
+                nn.LayerNorm(self.latent_dim),
+                nn.Linear(self.latent_dim, self.vae_dim),
+            )
+        else:
+            # Simple, per-token residual MLP in VAE space
+            self.refine = nn.Sequential(
+                nn.Linear(self.vae_dim, self.vae_dim),
+                nn.GELU(),
+                nn.Dropout(self.dropout),
+                nn.Linear(self.vae_dim, self.vae_dim),
+            )
+            self.norm = nn.LayerNorm(self.vae_dim)
+
+    def forward(self, z_style, z_content):
+        """
+        z_style:   [B, D_latent]
+        z_content: [B, T, J, D_vae]  (normalized tokens)
+        returns:   [B, T, J, D_vae]
+        """
+        B, T, J, D = z_content.shape
+        assert D == self.vae_dim, f"z_content last dim {D} != vae_dim {self.vae_dim}"
+
+        # Compute FiLM parameters from style
+        gamma = self.gamma_net(z_style)[:, None, None, :]   # [B,1,1,D_vae]
+        beta  = self.beta_net(z_style)[:, None, None, :]    # [B,1,1,D_vae]
+
+        # Stable FiLM: (1 + tanh(gamma)) * content + beta
+        z_new = (1.0 + torch.tanh(gamma)) * z_content + beta  # [B,T,J,D_vae]
+
+        if self.n_layers > 0:
+            # Flatten to tokens, add positions, cross-attend to nothing (pure self-FFN in blocks)
+            # Here, DecoderBlock is used in "self-attn like" manner by passing context=q.
+            # Keeps your module vocabulary consistent.
+            tokens = self.token_proj(z_new).view(B, T * J, self.latent_dim)  # [B,N,D_latent]
+            q = self.pos_embed(tokens)
+            for blk in self.blocks:
+                q = blk(q, q)  # use tokens as both query & context
+            out = self.out_proj(q).view(B, T, J, self.vae_dim)
+        else:
+            # Simple residual per-token refinement in VAE space
+            out = self.norm(z_new + self.refine(z_new))
+
+        return out
+
+
 # --- 
 class StyleContentNet(nn.Module):
     def __init__(self, config):

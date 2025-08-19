@@ -74,111 +74,136 @@ from matplotlib.animation import FuncAnimation
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-def plot_pair_3d_motion(
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+
+import numpy as np
+import matplotlib
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+def plot_triple_3d_motion(
     save_path,
     kinematic_tree,
-    joints_left,   # [T, 22, 3]  e.g. recon
-    joints_right,  # [T, 22, 3]  e.g. swap
-    title_left="Recon",
-    title_right="Swap",
-    figsize=(12, 6),
+    joints_gt,       # [T, 22, 3]
+    joints_recon,    # [T, 22, 3]
+    joints_swap,     # [T, 22, 3]
+    title_gt="GT",
+    title_recon="Recon",
+    title_swap="Swap",
+    figsize=(18, 6),
     fps=120,
     radius=4.0
 ):
-    """
-    Renders two sequences side-by-side in one video.
-    Each sequence is normalized to its own root trajectory but shares the same
-    camera settings per frame for fair visual comparison.
-    """
-    def prep(j):
-        # j: [T, 22, 3] -> centered & trajectory extracted for ground plane
-        data = j.copy()
-        T = data.shape[0]
+    matplotlib.use('Agg')
 
-        # height normalize (subtract min Y over full seq)
+    def prep_clip(joints):
+        data = joints.copy().reshape(len(joints), -1, 3)
         mins = data.min(axis=0).min(axis=0)
         maxs = data.max(axis=0).max(axis=0)
-
-        height_offset = mins[1]
-        data[:, :, 1] -= height_offset  # lift to ground
-
-        # global trajectory from root (assume joint 0 is root)
-        traj = data[:, 0, [0, 2]]  # [T, 2] (x, z)
-
-        # center each frame on root in XZ (so subject stays near origin)
+        # lift to ground
+        data[:, :, 1] -= mins[1]
+        # root trajectory (x,z)
+        traj = data[:, 0, [0, 2]]
+        # center each frame on root XZ
         data[..., 0] -= data[:, 0:1, 0]
         data[..., 2] -= data[:, 0:1, 2]
+        return {"data": data, "mins": mins, "maxs": maxs, "traj": traj, "T": data.shape[0]}
 
-        return data, traj, mins, maxs
+    G = prep_clip(joints_gt)
+    R = prep_clip(joints_recon)
+    S = prep_clip(joints_swap)
+    T = G["T"]
+    assert R["T"] == T and S["T"] == T, "All three sequences must have equal length"
 
-    data_L, traj_L, mins_L, maxs_L = prep(joints_left)
-    data_R, traj_R, mins_R, maxs_R = prep(joints_right)
-
-    # global bounds (use both clips to get shared axis limits)
-    mins = np.minimum(mins_L, mins_R)
-    maxs = np.maximum(maxs_L, maxs_R)
-
+    # same palette & widths as your original
     colors = ['red','blue','black','red','blue',
               'darkblue','darkblue','darkblue','darkblue','darkblue',
               'darkred','darkred','darkred','darkred','darkred']
 
     fig = plt.figure(figsize=figsize)
-    axL = fig.add_subplot(1, 2, 1, projection='3d')
-    axR = fig.add_subplot(1, 2, 2, projection='3d')
+    axG = fig.add_subplot(1, 3, 1, projection='3d')
+    axR = fig.add_subplot(1, 3, 2, projection='3d')
+    axS = fig.add_subplot(1, 3, 3, projection='3d')
+    axes  = [axG, axR, axS]
+    clips = [G,   R,   S]
+    titles = [title_gt, title_recon, title_swap]
 
-    def init_ax(ax, title):
+    for ax, title in zip(axes, titles):
         ax.set_xlim3d([-radius / 2, radius / 2])
         ax.set_ylim3d([0, radius])
         ax.set_zlim3d([0, radius])
         ax.set_title(title, fontsize=12)
         ax.grid(False)
-        ax.set_xticklabels([]); ax.set_yticklabels([]); ax.set_zticklabels([])
+        ax.set_axis_off()  # same effect as plt.axis('off') but scoped to this ax
         ax.view_init(elev=120, azim=-90)
-        ax.dist = 7.5
+        try: ax.dist = 7.5
+        except Exception: pass
 
-    def plot_xz_plane(ax, minx, maxx, minz, maxz):
-        verts = [[minx, 0, minz],
-                 [minx, 0, maxz],
-                 [maxx, 0, maxz],
-                 [maxx, 0, minz]]
-        plane = Poly3DCollection([verts])
+    fig.suptitle(f"{title_gt} | {title_recon} | {title_swap}", fontsize=16)
+
+    # ----- initialize artists once -----
+    planes = []
+    traj_lines = []
+    bone_lines = []   # list per-axes, each contains per-chain line
+    for ax in axes:
+        # simple initial plane (will update verts each frame)
+        verts0 = [[-radius/2, 0, 0],
+                  [-radius/2, 0, radius],
+                  [ radius/2, 0, radius],
+                  [ radius/2, 0, 0]]
+        plane = Poly3DCollection([verts0])
         plane.set_facecolor((0.5, 0.5, 0.5, 0.5))
         ax.add_collection3d(plane)
+        planes.append(plane)
 
-    init_ax(axL, title_left)
-    init_ax(axR, title_right)
-    fig.suptitle(f"{title_left} | {title_right}", fontsize=14)
+        # past trajectory line
+        line_traj, = ax.plot([], [], [], linewidth=1.0, color='blue')
+        traj_lines.append(line_traj)
 
-    T = data_L.shape[0]
-    assert data_R.shape[0] == T, "Left and Right sequences must have equal length"
+        # skeleton chain lines
+        lines = []
+        for ci, chain in enumerate(kinematic_tree):
+            lw = 4.0 if ci < 5 else 2.0
+            line, = ax.plot([], [], [], linewidth=lw, color=colors[ci % len(colors)])
+            lines.append(line)
+        bone_lines.append(lines)
 
-    def draw_frame(ax, data, traj, idx):
-        for line in ax.get_lines():
-            line.remove()
-        for coll in list(ax.collections):
-            coll.remove()
-        # ground plane aligned to current trajectory offset (XZ)
-        plot_xz_plane(
-            ax,
-            mins[0] - traj[idx, 0], maxs[0] - traj[idx, 0],
-            mins[2] - traj[idx, 1], maxs[2] - traj[idx, 1]
-        )
-        if idx > 1:
-            ax.plot3D(traj[:idx, 0] - traj[idx, 0],
-                      np.zeros_like(traj[:idx, 0]),
-                      traj[:idx, 1] - traj[idx, 1],
-                      linewidth=1.0, color='blue')
-
-        for i, (chain, color) in enumerate(zip(kinematic_tree, colors)):
-            lw = 4.0 if i < 5 else 2.0
-            ax.plot3D(data[idx, chain, 0],
-                      data[idx, chain, 1],
-                      data[idx, chain, 2],
-                      linewidth=lw, color=color)
-
+    # ----- per-frame update -----
     def update(idx):
-        draw_frame(axL, data_L, traj_L, idx)
-        draw_frame(axR, data_R, traj_R, idx)
+        for ax, plane, ltraj, lines, clip in zip(axes, planes, traj_lines, bone_lines, clips):
+            data, traj, mins, maxs = clip["data"], clip["traj"], clip["mins"], clip["maxs"]
+
+            # update ground plane verts to follow global XZ bounds relative to current root
+            px0, px1 = mins[0] - traj[idx, 0], maxs[0] - traj[idx, 0]
+            pz0, pz1 = mins[2] - traj[idx, 1], maxs[2] - traj[idx, 1]
+            plane.set_verts([[[px0, 0.0, pz0],
+                               [px0, 0.0, pz1],
+                               [px1, 0.0, pz1],
+                               [px1, 0.0, pz0]]])
+
+            # update past trajectory (XZ, centered)
+            if idx > 1:
+                x = traj[:idx, 0] - traj[idx, 0]
+                y = np.zeros_like(x)
+                z = traj[:idx, 1] - traj[idx, 1]
+                ltraj.set_data_3d(x, y, z)
+            else:
+                ltraj.set_data_3d([], [], [])
+
+            # update bones
+            for line, chain in zip(lines, kinematic_tree):
+                xs = data[idx, chain, 0]
+                ys = data[idx, chain, 1]
+                zs = data[idx, chain, 2]
+                line.set_data_3d(xs, ys, zs)
+
+        # return a flat tuple of artists for FuncAnimation (no blit)
+        return tuple(traj_lines) + tuple(l for lines in bone_lines for l in lines) + tuple(planes)
 
     ani = FuncAnimation(fig, update, frames=T, interval=1000 / fps, repeat=False)
     ani.save(save_path, fps=fps)
@@ -255,18 +280,23 @@ if __name__ == "__main__":
             out = model.encode(motions)
             z_style = out["z_style"]
             z_content = out["z_content"]
+            z_latent = out["z_latent"]
 
             z_recon = model.decode(z_style, z_content)
             z_swap  = model.decode(z_style_swap, z_content)
+            motions_gt = model.encoder.vae.decode(z_latent) 
             motions_swap  = model.encoder.vae.decode(z_swap)   # [B, T, J, D]
             motions_recon = model.encoder.vae.decode(z_recon)
 
+        motions_gt = motions * std + mean
         motions_recon = motions_recon * std + mean
         motions_swap  = motions_swap  * std + mean
 
+        joints_gt    = recover_from_ric(motions_gt, 22)
         joints_swap  = recover_from_ric(motions_swap, 22)
         joints_recon = recover_from_ric(motions_recon, 22)
 
+        joints_gt       = joints_gt.detach().cpu().numpy()
         joints_recon_np = joints_recon.detach().cpu().numpy()
         joints_swap_np  = joints_swap.detach().cpu().numpy()
 
@@ -278,14 +308,16 @@ if __name__ == "__main__":
         for i, motion_id in enumerate(tqdm(motion_ids, desc="Rendering videos", leave=False)):
             save_path = os.path.join(output_dir, f"{motion_id}_{style_label}_pair.mp4")
 
-            plot_pair_3d_motion(
-                save_path=save_path,
+            plot_triple_3d_motion(
+                save_path=os.path.join(output_dir, f"{motion_id}_{style_label}_triple.mp4"),
                 kinematic_tree=kinematic_tree,
-                joints_left=joints_recon_np[i],   # [T,22,3]
-                joints_right=joints_swap_np[i],   # [T,22,3]
-                title_left="Recon",
-                title_right=f"Swap → {style_label}",
-                figsize=(12, 6),
+                joints_gt=joints_gt[i],
+                joints_recon=joints_recon_np[i],
+                joints_swap=joints_swap_np[i],
+                title_gt="GT",
+                title_recon="Recon",
+                title_swap=f"Swap → {style_label}",
+                figsize=(18,6),
                 fps=20,
                 radius=4.0
             )

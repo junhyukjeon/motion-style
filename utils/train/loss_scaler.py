@@ -18,7 +18,40 @@ class LossScaler:
         self.ema_mean = defaultdict(lambda: 1.0)  # EMA(|raw|)
         self.ema_sq   = defaultdict(lambda: 1.0)  # EMA(raw^2)
 
+        self.freeze_after_warmup = bool(self._global_scaler().get("freeze_after_warmup", False))
+        self.frozen_denom = {}           # name -> scalar
+        self._calibrating = False
+        self._cal_sum_abs, self._cal_sum_sq, self._cal_count = None, None, 0
+
     # ---------- config lookups (compatible with your old usage) ----------
+
+    def begin_calibration(self):
+        from collections import defaultdict
+        self._calibrating = True
+        self._cal_sum_abs = defaultdict(float)
+        self._cal_sum_sq  = defaultdict(float)
+        self._cal_count   = 0
+
+    @torch.no_grad()
+    def accumulate_calibration(self, raw_losses: dict):
+        # raw_losses: {name: (anything, raw_tensor)}
+        for name, (_, raw) in raw_losses.items():
+            v = float(raw.detach())
+            self._cal_sum_abs[name] += abs(v)
+            self._cal_sum_sq[name]  += v * v
+        self._cal_count += 1
+
+    def end_calibration(self, use="rms", tau=1e-3):
+        assert self._calibrating, "begin_calibration() first"
+        for name in self._cal_sum_sq.keys():
+            if use == "mean":
+                d = self._cal_sum_abs[name] / max(1, self._cal_count)
+            else:  # rms
+                d = math.sqrt(self._cal_sum_sq[name] / max(1, self._cal_count))
+            self.frozen_denom[name] = max(d, tau)
+        self._calibrating = False
+        self._cal_sum_abs = self._cal_sum_sq = None
+        self._cal_count   = 0
 
     def _per_loss_block(self, name: str) -> dict:
         return self.loss_cfg.get(name, {}) if isinstance(self.loss_cfg.get(name, {}), dict) else {}
@@ -63,13 +96,14 @@ class LossScaler:
         self.ema_sq[name]   = (1 - a) * self.ema_sq[name]   + a * (v * v)
 
     def _denom(self, name):
+        # Prefer frozen denominators after burn-in
+        if name in self.frozen_denom:
+            return self.frozen_denom[name]
+        # fallback to live EMA if you want (or return None to skip)
         mode = self._cfg(name, "mode", "rms")
-        if mode == "off":
-            return None
-        if mode == "mean":
-            return self.ema_mean[name]
-        if mode == "rms":
-            return math.sqrt(self.ema_sq[name] + self.eps)
+        if mode == "off": return None
+        if mode == "mean": return self.ema_mean[name]
+        if mode == "rms":  return math.sqrt(self.ema_sq[name] + self.eps)
         raise ValueError(f"Unknown scaler mode: {mode}")
 
     # ---------- main API (keeps your signature/behavior) ----------
@@ -119,70 +153,22 @@ class LossScaler:
             "alpha":    self.alpha,
             "eps":      self.eps,
             "warmup":   self.warmup,
+            "frozen_denom": dict(self.frozen_denom),
         }
 
     def load_state_dict(self, state):
         self.ema_mean = defaultdict(lambda: 1.0, state.get("ema_mean", {}))
         self.ema_sq   = defaultdict(lambda: 1.0, state.get("ema_sq", {}))
         self.step     = state.get("step", 0)
-        # keep current alpha/eps/warmup unless present
         self.alpha    = state.get("alpha", self.alpha)
         self.eps      = state.get("eps",   self.eps)
         self.warmup   = state.get("warmup", self.warmup)
+        self.frozen_denom = state.get("frozen_denom", {})
 
 # Optional standalone helper if you still call get_weight elsewhere
-def get_weight(loss_name, loss_cfg):
-    if loss_name in loss_cfg and "weight" in loss_cfg[loss_name]:
-        return float(loss_cfg[loss_name]["weight"])
-    if loss_name in ("style", "content") and "stylecon" in loss_cfg:
-        return float(loss_cfg["stylecon"].get("weight", 1.0))
-    return float(loss_cfg.get("scaler", {}).get("default_weight", 1.0))
-
-
 # def get_weight(loss_name, loss_cfg):
-#     if loss_name in loss_cfg:
-#         return loss_cfg[loss_name]["weight"]
+#     if loss_name in loss_cfg and "weight" in loss_cfg[loss_name]:
+#         return float(loss_cfg[loss_name]["weight"])
 #     if loss_name in ("style", "content") and "stylecon" in loss_cfg:
-#         return loss_cfg["stylecon"]["weight"]
-#     return 1.0
-
-
-# class LossScaler:
-#     def __init__(self, loss_cfg, alpha=0.01, eps=1e-8, warmup=100):
-#         self.loss_cfg = loss_cfg
-#         self.alpha = alpha
-#         self.eps = eps
-#         self.warmup = warmup
-#         self.step = 0
-#         self.running = defaultdict(lambda: 1.0)  # EMA of RAW values
-
-#     def normalize_and_weight(self, raw_losses: dict, train: bool):
-#         use_norm = self.step >= self.warmup
-#         new, total = {}, None
-
-#         for name, (_, raw) in raw_losses.items():
-#             if train:
-#                 prev = self.running[name]
-#                 rm = (1 - self.alpha) * prev + self.alpha * float(raw.detach())
-#                 self.running[name] = rm
-#             else:
-#                 rm = self.running[name]
-
-#             nf = rm + self.eps
-#             w = get_weight(name, self.loss_cfg)
-#             scaled = (w / nf) * raw if use_norm else w * raw
-
-#             new[name] = (scaled, raw)
-#             total = scaled if total is None else total + scaled
-
-#         if train:
-#             self.step += 1
-#         return new, total
-
-#     # For checkpoints
-#     def state_dict(self):
-#         return {"running": dict(self.running), "step": self.step}
-
-#     def load_state_dict(self, state):
-#         self.running = defaultdict(lambda: 1.0, state.get("running", {}))
-#         self.step = state.get("step", 0)
+#         return float(loss_cfg["stylecon"].get("weight", 1.0))
+#     return float(loss_cfg.get("scaler", {}).get("default_weight", 1.0))

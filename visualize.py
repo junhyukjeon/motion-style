@@ -256,6 +256,7 @@ if __name__ == "__main__":
     with torch.no_grad():
         out = model.encode(style_motion)
         z_style_swap = out["z_style"].expand(32, -1)
+        z_style_swap = z_style_swap * 0
 
     print(f"🎨 Using style from motion ID: {style_motion_id} (label: {style_label})")
 
@@ -281,9 +282,10 @@ if __name__ == "__main__":
             z_style = out["z_style"]
             z_content = out["z_content"]
             z_latent = out["z_latent"]
+            mem = out["mem"]
 
-            z_recon = model.decode(z_style, z_content)
-            z_swap  = model.decode(z_style_swap, z_content)
+            z_recon = model.decode(z_style, z_content, mem)
+            z_swap  = model.decode(z_style_swap, z_content, mem)
             motions_gt = model.encoder.vae.decode(z_latent) 
             motions_swap  = model.encoder.vae.decode(z_swap)   # [B, T, J, D]
             motions_recon = model.encoder.vae.decode(z_recon)

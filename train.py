@@ -48,6 +48,43 @@ def compute_raw_losses(loss_fns, loss_cfg, model, out, labels):
     return losses
 
 
+def get_weight(loss_name, loss_cfg):
+    if loss_name in loss_cfg and "weight" in loss_cfg[loss_name]:
+        return float(loss_cfg[loss_name]["weight"])
+    if loss_name in ("style", "content") and "stylecon" in loss_cfg:
+        return float(loss_cfg["stylecon"].get("weight", 1.0))
+    return float(loss_cfg.get("scaler", {}).get("default_weight", 1.0))
+
+
+def calibrate(model, train_loader, device, loss_cfg, loss_fns, scaler, optimizer, K=500):
+    """
+    Runs K *training* steps (with updates) and simultaneously collects calibration stats
+    from raw losses. After K steps, freezes denominators.
+    """
+    model.train()
+    scaler.begin_calibration()
+
+    pbar = tqdm(zip(range(K), train_loader), total=K, desc=f"[Burn-in Calib] K={K}")
+    for _, (motions, labels, contents, _) in pbar:
+        motions, labels = motions.to(device), labels.to(device)
+        out = model.encode(motions)
+        raw_losses = compute_raw_losses(loss_fns, loss_cfg, model, out, labels)
+        scaler.accumulate_calibration(raw_losses)
+
+        total_unscaled = None
+        for name, (_, raw) in raw_losses.items():
+            w = get_weight(name, loss_cfg)
+            total_unscaled = raw*w if total_unscaled is None else total_unscaled + raw*w
+
+        optimizer.zero_grad(set_to_none=True)
+        total_unscaled.backward()
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_grad)
+        optimizer.step()
+
+    scaler.end_calibration(use="rms", tau=1e-3)
+    print("📏 Burn-in calibration complete. Frozen denominators:", scaler.frozen_denom)
+
+
 def train(model, loader, device, loss_cfg, loss_fns, scaler, optimizer, writer=None, epoch=None, clip_grad=5.0):
     model.train()
     losses_scaled_sum = defaultdict(float)
@@ -76,7 +113,7 @@ def train(model, loader, device, loss_cfg, loss_fns, scaler, optimizer, writer=N
         # 4) backward + step
         optimizer.zero_grad(set_to_none=True)
         total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_grad)
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_grad)
         optimizer.step()
 
         # 5) tqdm
@@ -245,6 +282,8 @@ if __name__ == "__main__":
 
     best_val_loss = float('inf')
     model.encoder.vae.freeze()
+    
+    calibrate(model, train_loader, device, loss_cfg, loss_fns, scaler, optimizer, K=2000)
 
     for epoch in range(1, config['epochs'] + 1):
         # train_sampler.generate_batches()
@@ -303,8 +342,3 @@ if __name__ == "__main__":
             print(f"⏹️ Early stopping at epoch {epoch} "
                 f"(best task={early.best:.4f} at epoch {early.best_epoch})")
             break
-
-        # if valid_loss < best_val_loss:
-        #     best_val_loss = valid_loss
-        #     print(f"✅ New best model at epoch {epoch} (Val loss: {valid_loss:.4f})")
-        #     torch.save(model.state_dict(), os.path.join(config["checkpoint_dir"], "best.ckpt"))

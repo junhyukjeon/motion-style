@@ -251,14 +251,14 @@ class StyleContentEncoderTwo(nn.Module):
             z_latent, _ = self.vae.encode(motion)
 
         B, T, J, _ = z_latent.shape
-        x = self.project(z_latent).reshape(B, T * J, self.latent_dim)
+        mem = self.project(z_latent).reshape(B, T * J, self.latent_dim)
 
         q_s = self.query_style.expand(B, 1, -1)
         q_c = self.query_content.expand(B, 1, -1)
         q = torch.cat([q_s, q_c], dim=1)
 
         for block in self.blocks:
-            q = block(q, x)
+            q = block(q, mem)
 
         q_s, q_c = q[:, :1, :], q[:, 1:2, :]
         z_style = self.fc_style(q_s.squeeze(1))
@@ -266,7 +266,8 @@ class StyleContentEncoderTwo(nn.Module):
         return {
             'z_latent'  : z_latent,
             'z_style'   : z_style,
-            'z_content' : z_content
+            'z_content' : z_content,
+            'mem'       : mem, 
         }
     
     def forward_from_latent(self, z_latent):
@@ -446,7 +447,13 @@ class StyleContentDecoderTwo(nn.Module):
 
         self.query = nn.Parameter(torch.randn(1, 32 * 7, self.latent_dim) * 0.02)
         self.pos_embed = PositionalEmbedding(self.latent_dim, config["dropout"])
-        self.blocks = nn.ModuleList([
+
+        self.layers_encdec = nn.ModuleList([
+            DecoderBlock(self.latent_dim, config["n_heads"], config["dropout"])
+            for _ in range(config["n_layers"])
+        ])
+
+        self.layers_sc = nn.ModuleList([
             DecoderBlock(self.latent_dim, config["n_heads"], config["dropout"])
             for _ in range(config["n_layers"])
         ])
@@ -458,13 +465,12 @@ class StyleContentDecoderTwo(nn.Module):
 
         self.n_style_mem   = config.get('n_style_mem', 1)
         self.n_content_mem = config.get('n_content_mem', 1)
-
         self.style_expander   = (nn.Linear(self.latent_dim, self.n_style_mem * self.latent_dim)
                                  if self.n_style_mem > 1 else None)
         self.content_expander = (nn.Linear(self.latent_dim, self.n_content_mem * self.latent_dim)
                                  if self.n_content_mem > 1 else None)
         
-        self.film = nn.Linear(3 * self.latent_dim, 2 * self.latent_dim)
+        # self.film = nn.Linear(3 * self.latent_dim, 2 * self.latent_dim)
         
     def _expand_ctx(self, z, expander, n_mem):
         # Accept [B, D] or [B, N, D]; return [B, N_mem, D]
@@ -476,33 +482,32 @@ class StyleContentDecoderTwo(nn.Module):
                 z = z.unsqueeze(1)
         return z
 
-    def forward(self, z_style, z_content):
+    def forward(self, z_style, z_content, mem, detach_mem=False):
         B = z_style.size(0)
+        q = self.pos_embed(self.query.expand(B, -1, -1))        # [B, T*J, D]
 
-        ctx_style = self._expand_ctx(z_style, self.style_expander, 1)
-        ctx_content = self._expand_ctx(z_content, self.content_expander, 1)
-        context = torch.cat([ctx_style, ctx_content], dim=1)
+        # tiny context: [style, content]
+        ctx_style   = self._expand_ctx(z_style,   self.style_expander,   1)  # [B,1,D]
+        ctx_content = self._expand_ctx(z_content, self.content_expander, 1)  # [B,1,D]
+        context     = torch.cat([ctx_style, ctx_content], dim=1)           # [B,2,D]
 
-        q0 = self.query.expand(B, -1, -1)
+        # optionally block style-loss gradients into mem (prevents style leak)
+        mem_kv = mem.detach() if detach_mem else mem
 
-        # Positional embedding
-        q = self.pos_embed(q0)
+        # each layer: (1) attend to mem, (2) attend to [style, content]
+        for encdec_blk, sc_blk in zip(self.layers_encdec, self.layers_sc):
+            q = encdec_blk(q, mem_kv)     # queries -> memory (details)
+            q = sc_blk(q, context)        # queries -> style/content (global conditioning)
 
-        # FiLM
-        h = torch.cat([z_style, z_content, z_style * z_content], dim =-1)
-        gamma, beta = self.film(h).chunk(2, dim=-1)   # [B,D], [B,D]
-        gamma = torch.tanh(gamma).unsqueeze(1)        # [B,1,D]
-        beta  = beta.unsqueeze(1)                     # [B,1,D]
-        query = q * (1 + gamma) + beta                # [B, T*J, D]
+        tokens = self.out_proj(q)          # [B, T*J, D_vae]
+        T, J = (32, 7)
+        z_rec = tokens.view(B, T, J, -1)
 
-        # Cross-attention
-        for blk in self.blocks:
-            query = blk(query, context)
+        # # residual decoding (optional but helpful)
+        # if z_latent is not None:
+        #     z_rec = z_latent + z_rec
 
-        tokens = self.out_proj(query)
-        out_D = tokens.size(-1)
-        x_rec = tokens.view(B, 32, 7, out_D)
-        return x_rec
+        return z_rec
 
 
 class StyleContentDecoderThree(nn.Module):
@@ -686,6 +691,166 @@ class StyleContentDecoderFour(nn.Module):
         x = self.net(x)
         return x.view(B, T, J, D)
 
+
+class StyleContentEncoderFive(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        self.vae_opt = get_opt("checkpoints/t2m/t2m_vae_gelu/opt.txt", self.device)
+
+        self.vae = load_vae(self.vae_opt).to(self.device)
+        self.vae.eval().requires_grad_(False)
+
+        self.latent_dim = config["latent_dim"]
+
+        # Projection
+        self.project = nn.Sequential(
+            nn.Linear(self.vae_opt.latent_dim, self.latent_dim),
+            nn.ReLU(),
+            nn.Linear(self.latent_dim, self.latent_dim),
+        )
+
+        # Learnable queries
+        self.query_style = nn.Parameter(torch.randn(1, 1, self.latent_dim) * 0.02)
+        self.query_content = nn.Parameter(torch.randn(1, 1, self.latent_dim) * 0.02)
+
+        # Cross attention blocks
+        self.blocks = nn.ModuleList([
+            EncoderBlock(self.latent_dim, config['n_heads'], config['dropout'])
+            for _ in range(config["n_layers"])
+        ])
+
+        # Output heads
+        self.fc_style = nn.Sequential(
+            nn.LayerNorm(self.latent_dim),
+            nn.Linear(self.latent_dim, self.latent_dim)
+        )
+        self.fc_content = nn.Sequential(
+            nn.LayerNorm(self.latent_dim),
+            nn.Linear(self.latent_dim, self.latent_dim)
+        )
+
+    def forward(self, motion):
+        with torch.no_grad():
+            z_latent, _ = self.vae.encode(motion)  # [B, T, J, D]
+
+        B, T, J, _ = z_latent.shape
+        x = self.project(z_latent).reshape(B, T * J, self.latent_dim)
+
+        q_s = self.query_style.expand(B, 1, -1)
+        q_c = self.query_content.expand(B, 1, -1)
+        q = torch.cat([q_s, q_c], dim=1)
+
+        for block in self.blocks:
+            q = block(q, x)
+
+        q_s, q_c = q[:, :1, :], q[:, 1:2, :]
+        z_style = self.fc_style(q_s.squeeze(1))
+        z_content = self.fc_content(q_c.squeeze(1))
+
+        return {
+            'z_latent': z_latent,
+            'z_style': z_style,
+            'z_content': z_content,
+            'mem' : None
+        }
+
+    def forward_from_latent(self, z_latent):
+        B, T, J, _ = z_latent.shape
+        x = self.project(z_latent).reshape(B, T * J, self.latent_dim)
+
+        q_s = self.query_style.expand(B, 1, -1)
+        q_c = self.query_content.expand(B, 1, -1)
+        q = torch.cat([q_s, q_c], dim=1)
+
+        for block in self.blocks:
+            q = block(q, x)
+
+        q_s, q_c = q[:, :1, :], q[:, 1:2, :]
+        z_style = self.fc_style(q_s.squeeze(1))
+        z_content = self.fc_content(q_c.squeeze(1))
+
+        return {
+            'z_latent': z_latent,
+            'z_style': z_style,
+            'z_content': z_content,
+            'mem' : None
+        }
+
+
+class StyleContentDecoderFive(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        self.vae_opt = get_opt("checkpoints/t2m/t2m_vae_gelu/opt.txt", self.device)
+
+        self.latent_dim = config['latent_dim']
+        self.query = nn.Parameter(torch.randn(1, 32 * 7, self.latent_dim) * 0.02)
+
+        self.pos_embed = PositionalEmbedding(self.latent_dim, config["dropout"])
+        self.blocks = nn.ModuleList([
+            DecoderBlock(self.latent_dim, config["n_heads"], config["dropout"])
+            for _ in range(config["n_layers"])
+        ])
+
+        self.out_proj = nn.Sequential(
+            nn.LayerNorm(self.latent_dim),
+            nn.Linear(self.latent_dim, self.vae_opt.latent_dim),
+        )
+
+        self.n_style_mem = config.get('n_style_mem', 1)
+        self.n_content_mem = config.get('n_content_mem', 1)
+
+        self.style_expander = (
+            nn.Linear(self.latent_dim, self.n_style_mem * self.latent_dim)
+            if self.n_style_mem > 1 else None
+        )
+        self.content_expander = (
+            nn.Linear(self.latent_dim, self.n_content_mem * self.latent_dim)
+            if self.n_content_mem > 1 else None
+        )
+
+        self.film = nn.Linear(3 * self.latent_dim, 2 * self.latent_dim)
+
+    def _expand_ctx(self, z, expander, n_mem):
+        # Accept [B, D] or [B, N, D]; return [B, N_mem, D]
+        if z.dim() == 2:
+            B, D = z.shape
+            if expander is not None:
+                z = expander(z).view(B, n_mem, D)
+            else:
+                z = z.unsqueeze(1)
+        return z
+
+    def forward(self, z_style, z_content, *args):
+        B = z_style.size(0)
+
+        ctx_style = self._expand_ctx(z_style, self.style_expander, 1)
+        ctx_content = self._expand_ctx(z_content, self.content_expander, 1)
+        context = torch.cat([ctx_style, ctx_content], dim=1)
+
+        q0 = self.query.expand(B, -1, -1)
+        q = self.pos_embed(q0)
+
+        # FiLM modulation
+        h = torch.cat([z_style, z_content, z_style * z_content], dim=-1)
+        gamma, beta = self.film(h).chunk(2, dim=-1)
+        gamma = torch.tanh(gamma).unsqueeze(1)  # [B, 1, D]
+        beta = beta.unsqueeze(1)                # [B, 1, D]
+
+        query = q * (1 + gamma) + beta          # [B, T*J, D]
+
+        # Cross-attention
+        for blk in self.blocks:
+            query = blk(query, context)
+
+        tokens = self.out_proj(query)
+        out_D = tokens.size(-1)
+
+        x_rec = tokens.view(B, 32, 7, out_D)
+        return x_rec
+
+
 # --- 
 class StyleContentNet(nn.Module):
     def __init__(self, config):
@@ -696,8 +861,8 @@ class StyleContentNet(nn.Module):
     def encode(self, motion):
         return self.encoder(motion)
 
-    def decode(self, z_style, z_content):
-        return self.decoder(z_style, z_content)
+    def decode(self, z_style, z_content, mem=None, detach_mem=None):
+        return self.decoder(z_style, z_content, mem, detach_mem)
 
 
 NETWORK_REGISTRY = {
@@ -711,7 +876,9 @@ NETWORK_REGISTRY = {
     "StyleContentEncoderTwo": StyleContentEncoderTwo,
     "StyleContentEncoderThree": StyleContentEncoderThree,
     "StyleContentEncoderFour": StyleContentEncoderFour,
+    "StyleContentEncoderFive": StyleContentEncoderFive,
     "StyleContentDecoderTwo": StyleContentDecoderTwo,
     "StyleContentDecoderThree": StyleContentDecoderThree,
     "StyleContentDecoderFour": StyleContentDecoderFour,
+    "StyleContentDecoderFive": StyleContentDecoderFive,
 }

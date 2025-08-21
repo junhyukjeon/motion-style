@@ -21,7 +21,9 @@ def plot_tsne(model, loader, device, epoch=None, title="valid", result_dir="", l
             labels = labels.to(device)
 
             out = model.encode(motions)
-            z_style = out["z_style"].cpu()
+            z_style = out["z_style"]
+            z_style = z_style.mean(dim=(1, 2))
+            z_style = z_style.cpu()
             labels = labels.cpu()
 
             remaining = max_samples - sum(len(l) for l in all_labels)

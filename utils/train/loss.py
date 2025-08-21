@@ -6,8 +6,8 @@ def loss_recon(config, model, out, labels):
     z_latent = out["z_latent"]
     z_style = out["z_style"]
     z_content = out["z_content"]
-    mem = out["mem"]
-    z_recon = model.decode(z_style, z_content, mem)
+    # mem = out["mem"]
+    z_recon = model.decode(z_style, z_content)
 
     return F.mse_loss(z_recon, z_latent)
 
@@ -17,6 +17,10 @@ def loss_supcon(config, model, out, labels):
     anchor = config['anchor']
     
     z = out['z_style']
+
+    if z.dim() == 4:                 # [B, T, J, D]
+        z = z.mean(dim=(1, 2)) 
+
     if anchor:
         z = z[4:]
         labels = labels[4:]
@@ -41,27 +45,27 @@ def loss_supcon(config, model, out, labels):
     return -mean_log_prob_pos.mean()
 
 
-def loss_stylecon(config, model, out, labels):
-    z_style = out['z_style']
-    z_content = out['z_content']
-    mem = out['mem']
-    # gamma = out['gamma']
-    # beta = out['beta']
-    
+def loss_stylecon(config, model, out, labels=None):
+    z_style   = out['z_style']     # [B, ...]
+    z_content = out['z_content']   # [B, ...]
     B = z_style.shape[0]
     perm = torch.randperm(B, device=z_style.device)
-    
+
     # ---- Style consistency ----
-    # swap style; detach content so style loss doesn't push content encoder
-    z_fused_style = model.decode(z_style[perm], z_content.detach(), mem, detach_mem=True)
-    new_style     = model.encoder.forward_from_latent(z_fused_style)
-    style_loss    = F.mse_loss(new_style['z_style'], z_style[perm].detach())
+    z_fused_style = model.decode(
+        z_style[perm].detach(),   # conditioning style: frozen
+        z_content.detach()        # content queries: frozen
+    )
+    new_style  = model.encoder.forward_from_latent(z_fused_style)
+    style_loss = F.mse_loss(new_style['z_style'], z_style[perm].detach())  # target: frozen
 
     # ---- Content consistency ----
-    # keep content; detach style so content loss doesn't push style encoder
-    z_fused_content = model.decode(z_style.detach(), z_content, mem, detach_mem=True)
-    new_content     = model.encoder.forward_from_latent(z_fused_content)
-    content_loss    = F.mse_loss(new_content['z_content'], z_content.detach())
+    z_fused_content = model.decode(
+        z_style.detach(),         # conditioning style: frozen
+        z_content.detach()        # content queries: frozen
+    )
+    new_content   = model.encoder.forward_from_latent(z_fused_content)
+    content_loss  = F.mse_loss(new_content['z_content'], z_content.detach())  # target: frozen
 
     return style_loss, content_loss
 

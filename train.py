@@ -278,7 +278,7 @@ if __name__ == "__main__":
     scaler = LossScaler(loss_cfg, alpha=ALPHA, eps=NORM_EPS, warmup=WARMUP_BATCHES)
 
     #####################
-    MAX_TRAIN_BATCHES = 10000000
+    MAX_TRAIN_BATCHES = 1000000
 
     best_val_loss = float('inf')
     model.encoder.vae.freeze()

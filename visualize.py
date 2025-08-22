@@ -255,7 +255,7 @@ if __name__ == "__main__":
 
     with torch.no_grad():
         out = model.encode(style_motion)
-        z_style_swap = out["z_style"].expand(32, -1, -1, -1)
+        z_style_swap = out["z_style"].expand(32, -1)
         # z_style_swap = z_style_swap * 0
 
     print(f"🎨 Using style from motion ID: {style_motion_id} (label: {style_label})")

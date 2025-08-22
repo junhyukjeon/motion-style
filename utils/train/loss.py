@@ -6,8 +6,9 @@ def loss_recon(config, model, out, labels):
     z_latent = out["z_latent"]
     z_style = out["z_style"]
     z_content = out["z_content"]
-    # mem = out["mem"]
-    z_recon = model.decode(z_style, z_content)
+
+    z_recon = model.decode(z_style.detach(), z_content)
+    # z_recon = model.decode(z_style, z_content)
 
     return F.mse_loss(z_recon, z_latent)
 
@@ -51,21 +52,14 @@ def loss_stylecon(config, model, out, labels=None):
     B = z_style.shape[0]
     perm = torch.randperm(B, device=z_style.device)
 
-    # ---- Style consistency ----
-    z_fused_style = model.decode(
-        z_style[perm].detach(),   # conditioning style: frozen
-        z_content.detach()        # content queries: frozen
-    )
-    new_style  = model.encoder.forward_from_latent(z_fused_style)
-    style_loss = F.mse_loss(new_style['z_style'], z_style[perm].detach())  # target: frozen
+    z_fused_s = model.decode(z_style[perm], z_content.detach())
+    z_fused_c = model.decode(z_style[perm].detach(), z_content)
 
-    # ---- Content consistency ----
-    z_fused_content = model.decode(
-        z_style.detach(),         # conditioning style: frozen
-        z_content.detach()        # content queries: frozen
-    )
-    new_content   = model.encoder.forward_from_latent(z_fused_content)
-    content_loss  = F.mse_loss(new_content['z_content'], z_content.detach())  # target: frozen
+    new_s = model.encoder.forward_from_latent(z_fused_s)
+    new_c = model.encoder.forward_from_latent(z_fused_c)
+
+    style_loss    = F.mse_loss(new_s['z_style'], z_style[perm].detach())
+    content_loss  = F.mse_loss(new_c['z_content'], z_content.detach()) 
 
     return style_loss, content_loss
 

@@ -66,100 +66,106 @@ def load_vae(vae_opt):
 class StyleContentEncoder(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.device  = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        self.device  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.vae_opt = get_opt("checkpoints/t2m/t2m_vae_gelu/opt.txt", self.device)
 
-        # Frozen VAE encoder
         self.vae = load_vae(self.vae_opt).to(self.device)
         self.vae.eval().requires_grad_(False)
 
         self.vae_dim    = self.vae_opt.latent_dim
         self.latent_dim = config["latent_dim"]
 
-        # Token-wise MLPs (no pooling) for style and content
+        # token-wise projections
         self.style_mlp = nn.Sequential(
-            nn.Linear(self.vae_dim, self.latent_dim),
-            nn.GELU(),
+            nn.Linear(self.vae_dim, self.latent_dim), nn.GELU(),
             nn.Linear(self.latent_dim, self.latent_dim),
         )
         self.content_mlp = nn.Sequential(
-            nn.Linear(self.vae_dim, self.latent_dim),
-            nn.GELU(),
+            nn.Linear(self.vae_dim, self.latent_dim), nn.GELU(),
             nn.Linear(self.latent_dim, self.latent_dim),
         )
+        self.style_norm = nn.LayerNorm(self.latent_dim)
 
     def forward(self, motion: torch.Tensor):
         with torch.no_grad():
-            z_latent, _ = self.vae.encode(motion)  # [B, T, J, D_vae]
+            z_latent, _ = self.vae.encode(motion)             # [B, T, J, D_vae]
 
-        z_style   = self.style_mlp(z_latent)    # [B, T, J, latent_dim]
-        z_content = self.content_mlp(z_latent)  # [B, T, J, latent_dim]
-        return {
-            "z_latent":  z_latent,
-            "z_style":   z_style,
-            "z_content": z_content,
-        }
+        z_tokens  = self.style_mlp(z_latent)                  # [B, T, J, D]
+        z_style   = self.style_norm(z_tokens.mean(dim=(1, 2)))# [B, D]  (global style)
+        z_content = self.content_mlp(z_latent)                # [B, T, J, D]
+        return {"z_latent": z_latent, "z_style": z_style, "z_content": z_content}
 
     def forward_from_latent(self, z_latent: torch.Tensor):
-        assert z_latent.size(-1) == self.vae_dim, \
-            f"Expected z_latent last dim {self.vae_dim}, got {z_latent.size(-1)}"
-
-        z_style   = self.style_mlp(z_latent)
-        z_content = self.content_mlp(z_latent)
-        return {
-            "z_latent":  z_latent,
-            "z_style":   z_style,
-            "z_content": z_content
-        }
+        z_tokens  = self.style_mlp(z_latent)                  # [B, T, J, D]
+        z_style   = self.style_norm(z_tokens.mean(dim=(1, 2)))# [B, D]
+        z_content = self.content_mlp(z_latent)                # [B, T, J, D]
+        return {"z_latent": z_latent, "z_style": z_style, "z_content": z_content}
 
 
 class StyleContentDecoder(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.device   = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-        self.vae_opt  = get_opt("checkpoints/t2m/t2m_vae_gelu/opt.txt", self.device)
-        self.vae_dim  = self.vae_opt.latent_dim
+        self.device     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.vae_opt    = get_opt("checkpoints/t2m/t2m_vae_gelu/opt.txt", self.device)
+        self.vae_dim    = self.vae_opt.latent_dim
 
         self.latent_dim = config["latent_dim"]
         self.n_layers   = config["n_layers"]
         self.n_heads    = config["n_heads"]
         self.dropout    = config["dropout"]
 
-        # Positional embedding over queries (content tokens)
+        # positional embedding for content queries only
         self.pos_embed = PositionalEmbedding(self.latent_dim, self.dropout)
 
-        # Stack of cross-attn blocks (query attends to style tokens)
-        self.blocks = nn.ModuleList([
+        # allow a bit of query mixing before reading style
+        self.self_blocks = nn.ModuleList([
+            DecoderBlock(self.latent_dim, self.n_heads, self.dropout)
+            for _ in range(self.n_layers)
+        ])
+        # cross-attend to global style (no positional enc on style)
+        self.cross_blocks = nn.ModuleList([
             DecoderBlock(self.latent_dim, self.n_heads, self.dropout)
             for _ in range(self.n_layers)
         ])
 
-        # Project back to VAE latent dimension
+        self.ctx_proj = nn.Sequential(
+            nn.LayerNorm(self.latent_dim),
+            nn.Linear(self.latent_dim, self.latent_dim),
+        )
         self.out_proj = nn.Sequential(
             nn.LayerNorm(self.latent_dim),
             nn.Linear(self.latent_dim, self.vae_dim),
         )
 
-    def forward(self, z_style: torch.Tensor, z_content: torch.Tensor, *args, **kwargs):
-        B, T, J, Dq = z_content.shape
-        Ds = z_style.size(-1)
-        assert Dq == self.latent_dim and Ds == self.latent_dim, \
-            f"Expected last dim {self.latent_dim}, got {Dq} (content) and {Ds} (style)."
+    def forward(self, z_style: torch.Tensor, z_content: torch.Tensor, z_latent: torch.Tensor=None):
+        """
+        z_style:   [B, D] or [B, S, D]   (global style tokens)
+        z_content: [B, T, J, D]          (per-token content)
+        z_latent:  [B, T, J, D_vae] or None (for residual decoding)
+        """
+        B, T, J, D = z_content.shape
+        assert D == self.latent_dim
 
-        # Queries from content tokens
-        q = z_content.view(B, T * J, self.latent_dim)
+        # queries from content (add PE)
+        q = z_content.view(B, T * J, D)
         q = self.pos_embed(q)
 
-        # Context K/V from style tokens
-        ctx = z_style.view(B, -1, self.latent_dim)  # [B, T_s*J_s, D]
-        ctx = self.pos_embed(ctx)
+        # style context: ensure [B, S, D] & project; NO positional embedding here
+        if z_style.dim() == 2:
+            ctx = z_style.unsqueeze(1)           # [B, 1, D]
+        elif z_style.dim() == 3:
+            ctx = z_style
+        else:
+            raise ValueError("z_style must be [B,D] or [B,S,D]")
+        ctx = self.ctx_proj(ctx)
 
-        # Cross-attention stack
-        for blk in self.blocks:
-            q = blk(q, ctx)  # attn(Q=q, K=ctx, V=ctx) + FFN
+        # stacks: self-attn on content, then cross to style
+        for self_blk, cross_blk in zip(self.self_blocks, self.cross_blocks):
+            q = self_blk(q, q)       # self-attn over content tokens
+            q = cross_blk(q, ctx)    # cross-attn to global style tokens
 
-        out = self.out_proj(q).view(B, T, J, self.vae_dim)
-        return out
+        delta = self.out_proj(q).view(B, T, J, self.vae_dim)
+        return (z_latent + delta) if z_latent is not None else delta
 
 
 class StyleContentEncoderTwo(nn.Module):

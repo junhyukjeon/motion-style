@@ -283,7 +283,7 @@ if __name__ == "__main__":
     best_val_loss = float('inf')
     model.encoder.vae.freeze()
     
-    calibrate(model, train_loader, device, loss_cfg, loss_fns, scaler, optimizer, K=2000)
+    calibrate(model, train_loader, device, loss_cfg, loss_fns, scaler, optimizer, K=10000)
 
     for epoch in range(1, config['epochs'] + 1):
         # train_sampler.generate_batches()

@@ -16,7 +16,7 @@ def loss_recon(config, model, out, labels):
 def loss_supcon(config, model, out, labels):
     temperature = config['temperature']
     anchor = config['anchor']
-    
+
     z = out['z_style']
 
     if z.dim() == 4:                 # [B, T, J, D]
@@ -46,6 +46,36 @@ def loss_supcon(config, model, out, labels):
     return -mean_log_prob_pos.mean()
 
 
+def loss_supcon_recon(config, model, out, labels):
+    temperature = config['temperature']
+    anchor = config.get('anchor', False)
+
+    z_fused = model.decode(out['z_style'].detach(), out['z_content'].detach())
+
+    z = z_fused.mean(dim=(1, 2))
+
+    if anchor:
+        z = z[4:]
+        labels = labels[4:]
+
+    z = F.normalize(z, dim=1)
+
+    sim = torch.matmul(z, z.T) / temperature
+    N = sim.size(0)
+    logits_mask = ~torch.eye(N, dtype=torch.bool, device=z.device)
+
+    labels_row = labels.unsqueeze(0)
+    pos_mask = (labels_row == labels_row.T) & logits_mask
+
+    exp_sim = torch.exp(sim) * logits_mask
+    log_prob = sim - torch.log(exp_sim.sum(dim=1, keepdim=True) + 1e-8)
+
+    pos_counts = pos_mask.sum(dim=1).clamp_min(1)
+    mean_log_prob_pos = (pos_mask.float() * log_prob).sum(dim=1) / pos_counts
+
+    return -mean_log_prob_pos.mean()
+
+
 def loss_stylecon(config, model, out, labels=None):
     z_style   = out['z_style']     # [B, ...]
     z_content = out['z_content']   # [B, ...]
@@ -69,14 +99,6 @@ def loss_anchor(config, model, out, labels):
     return F.mse_loss(z_style[:4], torch.zeros_like(z_style[:4]))
 
 
-# def loss_orthogonality(config, model, out, labels):
-#     z_style = out["z_style"]
-#     z_content = out["z_content"]
-#     z_s = F.normalize(z_style, dim=-1)
-#     z_c = F.normalize(z_content, dim=-1)
-#     return (z_s * z_c).sum(dim=-1).pow(2).mean()
-
-
 def loss_magnitude(config, model, out, labels):
     z = out["z_style"]
     z = z[4:]
@@ -90,6 +112,7 @@ LOSS_REGISTRY = {
     "supcon": loss_supcon,
     "stylecon": loss_stylecon,
     "anchor": loss_anchor,
-    "magnitude": loss_magnitude
+    "magnitude": loss_magnitude,
+    "supcon_recon": loss_supcon_recon
 }
     

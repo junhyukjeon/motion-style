@@ -85,6 +85,7 @@ class StyleContentEncoder(nn.Module):
             nn.Linear(self.latent_dim, self.latent_dim),
         )
         self.style_norm = nn.LayerNorm(self.latent_dim)
+        self.content_norm = nn.LayerNorm(self.latent_dim)
 
     def forward(self, motion: torch.Tensor):
         with torch.no_grad():
@@ -92,13 +93,16 @@ class StyleContentEncoder(nn.Module):
 
         z_tokens  = self.style_mlp(z_latent)                  # [B, T, J, D]
         z_style   = self.style_norm(z_tokens.mean(dim=(1, 2)))# [B, D]  (global style)
-        z_content = self.content_mlp(z_latent)                # [B, T, J, D]
+        c_tokens  = self.content_mlp(z_latent)
+        z_content = self.content_norm(c_tokens)        
+
         return {"z_latent": z_latent, "z_style": z_style, "z_content": z_content}
 
     def forward_from_latent(self, z_latent: torch.Tensor):
         z_tokens  = self.style_mlp(z_latent)                  # [B, T, J, D]
         z_style   = self.style_norm(z_tokens.mean(dim=(1, 2)))# [B, D]
-        z_content = self.content_mlp(z_latent)                # [B, T, J, D]
+        c_tokens  = self.content_mlp(z_latent)                # [B, T, J, D]
+        z_content = self.content_norm(c_tokens)               # NEW: per-token LN
         return {"z_latent": z_latent, "z_style": z_style, "z_content": z_content}
 
 
@@ -137,11 +141,10 @@ class StyleContentDecoder(nn.Module):
             nn.Linear(self.latent_dim, self.vae_dim),
         )
 
-    def forward(self, z_style: torch.Tensor, z_content: torch.Tensor, z_latent: torch.Tensor=None):
+    def forward(self, z_style: torch.Tensor, z_content: torch.Tensor):
         """
         z_style:   [B, D] or [B, S, D]   (global style tokens)
         z_content: [B, T, J, D]          (per-token content)
-        z_latent:  [B, T, J, D_vae] or None (for residual decoding)
         """
         B, T, J, D = z_content.shape
         assert D == self.latent_dim
@@ -164,8 +167,8 @@ class StyleContentDecoder(nn.Module):
             q = self_blk(q, q)       # self-attn over content tokens
             q = cross_blk(q, ctx)    # cross-attn to global style tokens
 
-        delta = self.out_proj(q).view(B, T, J, self.vae_dim)
-        return (z_latent + delta) if z_latent is not None else delta
+        out = self.out_proj(q).view(B, T, J, self.vae_dim)  # FULL latent
+        return out
 
 
 class StyleContentEncoderTwo(nn.Module):

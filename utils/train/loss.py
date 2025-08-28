@@ -69,12 +69,20 @@ def loss_anchor(config, model, out, labels):
     return F.mse_loss(z_style[:4], torch.zeros_like(z_style[:4]))
 
 
-def loss_orthogonality(config, model, out, labels):
-    z_style = out["z_style"]
-    z_content = out["z_content"]
-    z_s = F.normalize(z_style, dim=-1)
-    z_c = F.normalize(z_content, dim=-1)
-    return (z_s * z_c).sum(dim=-1).pow(2).mean()
+# def loss_orthogonality(config, model, out, labels):
+#     z_style = out["z_style"]
+#     z_content = out["z_content"]
+#     z_s = F.normalize(z_style, dim=-1)
+#     z_c = F.normalize(z_content, dim=-1)
+#     return (z_s * z_c).sum(dim=-1).pow(2).mean()
+
+
+def loss_magnitude(config, model, out, labels):
+    z = out["z_style"]
+    z = z[4:]
+
+    norms = z.norm(dim=-1)
+    return (norms - 1.0).pow(2).mean()
 
 
 LOSS_REGISTRY = {
@@ -82,6 +90,6 @@ LOSS_REGISTRY = {
     "supcon": loss_supcon,
     "stylecon": loss_stylecon,
     "anchor": loss_anchor,
-    "orthogonality": loss_orthogonality
+    "magnitude": loss_magnitude
 }
     

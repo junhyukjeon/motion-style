@@ -2,24 +2,22 @@ import torch
 import torch.nn.functional as F
 
 
-def loss_recon(config, model, out, labels):
-    z_latent = out["z_latent"]
-    z_style = out["z_style"]
-    z_content = out["z_content"]
+def loss_recon1(config, model, out, labels):
+    return F.mse_loss(out["z_from_prime"], out["z_latent"])
 
-    z_recon = model.decode(z_style, z_content)
-    # z_recon = model.decode(z_style, z_content)
 
-    return F.mse_loss(z_recon, z_latent)
+def loss_recon2(config, model, out, labels):
+    z_recon = model.decode(out["z_style"], out["z_content"])
+    return F.mse_loss(z_recon, out["z_latent"])
 
 
 def loss_supcon(config, model, out, labels):
     temperature = config['temperature']
     anchor = config['anchor']
 
-    z = out['z_style']
+    z = out['z_prime']
 
-    if z.dim() == 4:                 # [B, T, J, D]
+    if z.dim() == 4:
         z = z.mean(dim=(1, 2)) 
 
     if anchor:
@@ -46,36 +44,6 @@ def loss_supcon(config, model, out, labels):
     return -mean_log_prob_pos.mean()
 
 
-def loss_supcon_recon(config, model, out, labels):
-    temperature = config['temperature']
-    anchor = config.get('anchor', False)
-
-    z_fused = model.decode(out['z_style'].detach(), out['z_content'].detach())
-
-    z = z_fused.mean(dim=(1, 2))
-
-    if anchor:
-        z = z[8:]
-        labels = labels[8:]
-
-    z = F.normalize(z, dim=1)
-
-    sim = torch.matmul(z, z.T) / temperature
-    N = sim.size(0)
-    logits_mask = ~torch.eye(N, dtype=torch.bool, device=z.device)
-
-    labels_row = labels.unsqueeze(0)
-    pos_mask = (labels_row == labels_row.T) & logits_mask
-
-    exp_sim = torch.exp(sim) * logits_mask
-    log_prob = sim - torch.log(exp_sim.sum(dim=1, keepdim=True) + 1e-8)
-
-    pos_counts = pos_mask.sum(dim=1).clamp_min(1)
-    mean_log_prob_pos = (pos_mask.float() * log_prob).sum(dim=1) / pos_counts
-
-    return -mean_log_prob_pos.mean()
-
-
 def loss_stylecon(config, model, out, labels=None):
     z_style   = out['z_style']     # [B, ...]
     z_content = out['z_content']   # [B, ...]
@@ -95,8 +63,10 @@ def loss_stylecon(config, model, out, labels=None):
 
 
 def loss_anchor(config, model, out, labels):
-    z_style = out["z_style"]
-    return F.mse_loss(z_style[:8], torch.zeros_like(z_style[:8]))
+    if z.dim() == 4:
+        z = z.mean(dim=(1, 2)) 
+    z = out["z_prime"]
+    return F.mse_loss(z[:8], torch.zeros_like(z[:8]))
 
 
 def loss_magnitude(config, model, out, labels):
@@ -108,11 +78,11 @@ def loss_magnitude(config, model, out, labels):
 
 
 LOSS_REGISTRY = {
-    "recon": loss_recon,
+    "recon1": loss_recon1,
+    "recon2": loss_recon2,
     "supcon": loss_supcon,
     "stylecon": loss_stylecon,
     "anchor": loss_anchor,
     "magnitude": loss_magnitude,
-    "supcon_recon": loss_supcon_recon
 }
     

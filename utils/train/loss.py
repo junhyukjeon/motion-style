@@ -7,7 +7,7 @@ def loss_recon(config, model, out, labels):
     z_style = out["z_style"]
     z_content = out["z_content"]
 
-    z_recon = model.decode(z_style.detach(), z_content)
+    z_recon = model.decode(z_style, z_content)
     # z_recon = model.decode(z_style, z_content)
 
     return F.mse_loss(z_recon, z_latent)
@@ -23,8 +23,8 @@ def loss_supcon(config, model, out, labels):
         z = z.mean(dim=(1, 2)) 
 
     if anchor:
-        z = z[4:]
-        labels = labels[4:]
+        z = z[8:]
+        labels = labels[8:]
 
     # Normalize so magnitude of z is not penalized
     z = F.normalize(z, dim=1)
@@ -55,8 +55,8 @@ def loss_supcon_recon(config, model, out, labels):
     z = z_fused.mean(dim=(1, 2))
 
     if anchor:
-        z = z[4:]
-        labels = labels[4:]
+        z = z[8:]
+        labels = labels[8:]
 
     z = F.normalize(z, dim=1)
 
@@ -96,12 +96,12 @@ def loss_stylecon(config, model, out, labels=None):
 
 def loss_anchor(config, model, out, labels):
     z_style = out["z_style"]
-    return F.mse_loss(z_style[:4], torch.zeros_like(z_style[:4]))
+    return F.mse_loss(z_style[:8], torch.zeros_like(z_style[:8]))
 
 
 def loss_magnitude(config, model, out, labels):
     z = out["z_style"]
-    z = z[4:]
+    z = z[8:]
 
     norms = z.norm(dim=-1)
     return (norms - 1.0).pow(2).mean()

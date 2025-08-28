@@ -60,14 +60,3 @@ class StyleDataset(Dataset):
         content = self.ids_to_content[motion_id]
 
         return torch.tensor(window, dtype=torch.float32), label, content, motion_id
-    
-
-# class LatentDataset(Dataset):
-#     def __init__(self, base_ds, cache_dir):
-#         self.base = base_ds
-#         self.cache_dir = cache_dir
-#     def __len__(self): return len(self.base)
-#     def __getitem__(self, idx):
-#         motions, labels, contents, m_id = self.base[idx]
-#         z = torch.load(os.path.join(self.cache_dir, f"{m_id}.pt"), map_load_location="cpu")
-#         return z, labels, contents, m_id

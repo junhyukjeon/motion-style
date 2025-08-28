@@ -2,9 +2,9 @@ from typing import List
 import torch
 import torch.nn as nn
 
-from model.denoiser.clip import FrozenCLIPTextEncoder
-from model.denoiser.embedding import TimestepEmbedding, PositionalEmbedding
-from model.dentransformer import SkipTransformer
+from salad.model.denoiser.clip import FrozenCLIPTextEncoder
+from salad.model.denoiser.embedding import TimestepEmbedding, PositionalEmbedding
+from model.skip_transformer import SkipTransformer
 
 class InputProcess(nn.Module):
     def __init__(self, opt, in_features):

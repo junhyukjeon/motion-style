@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 
 from model.denoiser import Denoiser
-from model.style_encoder import StyleEncoder
+from model.networks import StyleEncoder
 from salad.models.vae.model import VAE
 from salad.utils.get_opt import get_opt
 

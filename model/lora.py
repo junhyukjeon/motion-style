@@ -1,75 +1,33 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 class HyperLoRA(nn.Module):
-    """
-    Wrap a Linear W (and optional bias) with a low-rank delta:  W' = W + scale * A @ B
-    - We keep the base weight frozen; only A and B are trainable.
-    - The adapter **does not** add an extra bias (typical LoRA).
-    """
-    def __init__(self, config: dict):
+    def __init__(self, config: dict): 
         super().__init__()
         self.rank       = config["rank"]
         self.scale      = config["scale"]
         self.style_dim  = config["style_dim"]
-        self.latent_dim = config["latent_dim"]
+        self.in_dim     = config["in_dim"]
+        self.out_dim    = config["out_dim"]
+        self.hidden_dim = config["hidden_dim"]
 
-        out_A = self.rank * self.latent_dim
-        out_B = self.latent_dim * self.rank
-        self.hyperA = nn.Sequential(nn.SiLU(), nn.Linear(self.style_dim, self.latent_dim, nn.SiLU(), nn.Linear(self.latent_dim, self.latent_dim)))
-        self.hyperB = nn.Sequential(nn.SiLU(), nn.Linear(self.style_dim, self.latent_dim, nn.SiLU(), nn.Linear(self.latent_dim, self.latent_dim)))
-        
-        self.A0 = nn.Parameter(torch.empty(r, d_in))
-        self.B0 = nn.Parameter(torch.empty(d_out, r))
-        nn.init.kaiming_uniform_(self.A0, a=math.sqrt(5))
-        nn.init.zeros_(self.B0)
+        out_A = self.rank * self.in_dim
+        out_B = self.out_dim * self.rank
+        self.hyperA = nn.Sequential(nn.SiLU(), nn.Linear(self.style_dim, self.hidden_dim), nn.SiLU(), nn.Linear(self.hidden_dim, out_A))
+        self.hyperB = nn.Sequential(nn.SiLU(), nn.Linear(self.style_dim, self.hidden_dim), nn.SiLU(), nn.Linear(self.hidden_dim, out_B))
+
+        nn.init.kaiming_uniform_(self.hyperA[-1].weight, a=math.sqrt(5))
+        nn.init.zeros_(self.hyperA[-1].bias)
+        nn.init.zeros_(self.hyperB[-1].weight)
+        nn.init.zeros_(self.hyperB[-1].bias)
 
     def forward(self, z, style):
-        B, D = z.shape[0], z.shape[-1]
+        batch_size = z.shape[0]
+        A = self.hyperA(style).view(batch_size, self.rank, self.in_dim)
+        B = self.hyperB(style).view(batch_size, self.out_dim, self.rank)
 
-        A = self.hyperA(style).view(B, self.rank.)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        assert isinstance(base_linear, nn.Linear)
-        self.in_features  = base_linear.in_features
-        self.out_features = base_linear.out_features
-        self.r            = r
-        self.scaling      = alpha / r
-        self.lora_dropout = nn.Dropout(lora_dropout) if lora_dropout > 0 else nn.Identity()
-
-        # freeze original weight/bias
-        self.weight = base_linear.weight
-        self.bias   = base_linear.bias
-        self.weight.requires_grad_(False)
-        if self.bias is not None:
-            self.bias.requires_grad_(False)
-
-        # LoRA params (small rank)
-        self.A = nn.Parameter(torch.zeros((self.r, self.in_features)))
-        self.B = nn.Parameter(torch.zeros((self.out_features, self.r)))
-        # init per LoRA paper
-        nn.init.kaiming_uniform_(self.A, a=math.sqrt(5))
-        nn.init.zeros_(self.B)
-
-    def forward(self, x):
-        # base path
-        y = F.linear(x, self.weight, self.bias)
-        # low-rank path
-        # (B, *, in_features) x (in_features)->(r) x (r)->(out_features)
-        x_dropped = self.lora_dropout(x)
-        delta = F.linear(x_dropped, self.A)     # (B, *, r)
-        delta = F.linear(delta, self.B)         # (B, *, out_features)
-        return y + self.scaling * delta
+        tmp   = torch.einsum('bnd,brd->bnr', z, A)
+        delta = torch.einsum('bod,bnr->bno', B, tmp)
+        return self.scale * delta

@@ -79,14 +79,7 @@ class Denoiser(nn.Module):
 
     def forward(self, x, timestep_emb, text, len_mask=None, need_attn=False,
                 fixed_sa=None, fixed_ta=None, fixed_ca=None, fixed_cs=None, style_embedding=None, use_cached_clip=False):
-        """
-        Args:
-            x: [B, T, J, D]
-            timestep_emb: [B, D]
-            text: list of strings
-            len_mask: [B, T]
-            style_embedding: [B, D_style]
-        """
+
         # Input process
         x = self.input_process(x)
         B, T, J, D = x.size()

@@ -41,7 +41,7 @@ class MultiheadAttention(nn.Module):
         self.batch_first = batch_first
         self.dropout = nn.Dropout(dropout)
 
-        lora_config = config(["lora"])
+        lora_config = config["lora"]
         self.q_lora = HyperLoRA(lora_config)
         self.k_lora = HyperLoRA(lora_config)
         self.v_lora = HyperLoRA(lora_config)
@@ -57,33 +57,47 @@ class MultiheadAttention(nn.Module):
         B, T1, D = query.size()
         _, T2, _ = key.size()
 
-        query = self.Wq(query) + self.q_lora(query, style)
-        key   = self.Wk(key)   + self.k_lora(key, style)
-        value = self.Wv(value) + self.v_lora(value, style)
+        # Pre-projection Inputs
+        q_in, k_in, v_in = query, key, value
 
-        query = query.view(B, T1, self.n_heads, self.head_dim).transpose(1, 2)
-        key   = key.view(B, T2, self.n_heads, self.head_dim).transpose(1, 2)
-        value = value.view(B, T2, self.n_heads, self.head_dim).transpose(1, 2)
+        # Base projections
+        q = self.Wq(q_in)
+        k = self.Wk(k_in)
+        v = self.Wv(v_in)
 
-        attn_weights = torch.matmul(query, key.transpose(-2, -1)) / (self.head_dim ** 0.5)
+        # LoRA
+        if style is not None:
+            q = q + self.q_lora(q_in, style)
+            k = k + self.k_lora(k_in, style)
+            v = v + self.v_lora(v_in, style)
+
+        # Heads
+        q = q.view(B, T1, self.n_heads, self.head_dim).transpose(1, 2)
+        k = k.view(B, T2, self.n_heads, self.head_dim).transpose(1, 2)
+        v = v.view(B, T2, self.n_heads, self.head_dim).transpose(1, 2)
+
+        # Attention
+        attn_weights = torch.matmul(q, k.transpose(-2, -1)) / (self.head_dim ** 0.5)
         if key_padding_mask is not None:
             attn_weights = attn_weights.masked_fill(key_padding_mask[:, None, None, :], -1e9)
         attn_weights = F.softmax(attn_weights, dim=-1)
         attn_weights = self.dropout(attn_weights)
-        attn_output = torch.matmul(attn_weights, value)
+        attn_output  = torch.matmul(attn_weights, v)
 
-        # concat heads
+        # Concat heads
         attn_output = attn_output.transpose(1, 2).contiguous().view(B, T1, D)
 
-        # linear transformation
-        attn_output = self.Wo(attn_output)
+        # Output projection (+ optional O-LoRA; uses post-attn features as input)
+        out = self.Wo(attn_output)
+        if style is not None:
+            out = out + self.o_lora(attn_output, style)
 
         if need_weights:
             if average_attn_weights:
                 attn_weights = attn_weights.mean(dim=1)
-            return attn_output, attn_weights
+            return out, attn_weights
         else:
-            return attn_output, None
+            return out, None
     
     def forward_with_fixed_attn_weights(self, attn_weights, value, style=None):
         """
@@ -92,19 +106,23 @@ class MultiheadAttention(nn.Module):
         B, H, _, T2 = attn_weights.size()
         D = value.size(-1)
 
-        # linear transformation
-        value = self.Wv(value).view(B, T2, self.n_heads, self.head_dim).transpose(1, 2)
+        # Linear transformation
+        v_in = value
+        v = self.Wv(v_in)
+        if style is not None:
+            v = v + self.v_lora(v_in, style)
+        v = v.view(B, T2, self.n_heads, self.head_dim).transpose(1, 2)  # [B,H,T2,dh]
 
-        # scaled dot-product attention
-        attn_output = torch.matmul(attn_weights, value)
-
-        # concat heads
+        # Apply precomputed attention
+        attn_output = torch.matmul(attn_weights, v)                       # [B,H,T1,dh]
         attn_output = attn_output.transpose(1, 2).contiguous().view(B, -1, D)
 
-        # linear transformation
-        attn_output = self.Wo(attn_output)
+        # Output projection (+ optional O-LoRA; uses post-attn features as input)
+        out = self.Wo(attn_output)
+        if style is not None:
+            out = out + self.o_lora(attn_output, style)
 
-        return attn_output, attn_weights
+        return out, attn_weights
 
 
 class STTransformerLayer(nn.Module):
@@ -117,17 +135,17 @@ class STTransformerLayer(nn.Module):
         self.opt = opt
         
         # skeletal attention
-        self.skel_attn = MultiheadAttention(opt.latent_dim, opt.n_heads, opt.dropout, batch_first=True)
+        self.skel_attn = MultiheadAttention(config, opt.latent_dim, opt.n_heads, opt.dropout, batch_first=True)
         self.skel_norm = nn.LayerNorm(opt.latent_dim)
         self.skel_dropout = nn.Dropout(opt.dropout)
 
         # temporal attention
-        self.temp_attn = MultiheadAttention(opt.latent_dim, opt.n_heads, opt.dropout, batch_first=True)
+        self.temp_attn = MultiheadAttention(config, opt.latent_dim, opt.n_heads, opt.dropout, batch_first=True)
         self.temp_norm = nn.LayerNorm(opt.latent_dim)
         self.temp_dropout = nn.Dropout(opt.dropout)
 
         # cross attention
-        self.cross_attn = MultiheadAttention(opt.latent_dim, opt.n_heads, opt.dropout, batch_first=True)
+        self.cross_attn = MultiheadAttention(config, opt.latent_dim, opt.n_heads, opt.dropout, batch_first=True)
         self.cross_src_norm = nn.LayerNorm(opt.latent_dim)
         self.cross_tgt_norm = nn.LayerNorm(opt.latent_dim)
         self.cross_dropout = nn.Dropout(opt.dropout)
@@ -147,38 +165,31 @@ class STTransformerLayer(nn.Module):
         self.cross_film = DenseFiLM(opt)
         self.ffn_film = DenseFiLM(opt)
 
-        # LoRA
-        lora_cfg = config["lora"]
-        self.temp_lora  = HyperLoRA(lora_cfg)
-        self.skel_lora  = HyperLoRA(lora_cfg)
-        self.cross_lora = HyperLoRA(lora_cfg)
-
-
-    def _sa_block(self, x, fixed_attn=None):
+    def _sa_block(self, x, style=None, fixed_attn=None):
         x = self.skel_norm(x)
         if fixed_attn is None:
-            x, attn = self.skel_attn.forward(x, x, x, need_weights=True, average_attn_weights=False)
+            x, attn = self.skel_attn.forward(x, x, x, need_weights=True, average_attn_weights=False, style=style)
         else:
-            x, attn = self.skel_attn.forward_with_fixed_attn_weights(fixed_attn, x)
+            x, attn = self.skel_attn.forward_with_fixed_attn_weights(fixed_attn, x, style=style)
         x = self.skel_dropout(x)
         return x, attn
 
-    def _ta_block(self, x, mask=None, fixed_attn=None):
+    def _ta_block(self, x, style=None, mask=None, fixed_attn=None):
         x = self.temp_norm(x)
         if fixed_attn is None:
-            x, attn = self.temp_attn.forward(x, x, x, key_padding_mask=mask, need_weights=True, average_attn_weights=False)
+            x, attn = self.temp_attn.forward(x, x, x, key_padding_mask=mask, need_weights=True, average_attn_weights=False, style=style)
         else:
-            x, attn = self.temp_attn.forward_with_fixed_attn_weights(fixed_attn, x)
+            x, attn = self.temp_attn.forward_with_fixed_attn_weights(fixed_attn, x, style=style)
         x = self.temp_dropout(x)
         return x, attn
 
-    def _ca_block(self, x, mem, mask=None, fixed_attn=None):
+    def _ca_block(self, x, mem, style=None, mask=None, fixed_attn=None):
         x = self.cross_src_norm(x)
         mem = self.cross_tgt_norm(mem)
         if fixed_attn is None:
-            x, attn = self.cross_attn.forward(x, mem, mem, key_padding_mask=mask, need_weights=True, average_attn_weights=False)
+            x, attn = self.cross_attn.forward(x, mem, mem, key_padding_mask=mask, need_weights=True, average_attn_weights=False, style=style)
         else:
-            x, attn = self.cross_attn.forward_with_fixed_attn_weights(fixed_attn, mem)
+            x, attn = self.cross_attn.forward_with_fixed_attn_weights(fixed_attn, mem, style=style)
         x = self.cross_dropout(x)
         return x, attn
     
@@ -191,52 +202,60 @@ class STTransformerLayer(nn.Module):
         return x
     
     def forward(self, x, memory, cond, x_mask=None, memory_mask=None,
-                skel_attn=None, temp_attn=None, cross_attn=None):
+                skel_attn=None, temp_attn=None, cross_attn=None, style=None):
 
         B, T, J, D = x.size()
 
-        # diffusion timestep embedding
+        # Diffusion timestep embedding
         skel_cond = self.skel_film(cond)
         temp_cond = self.temp_film(cond)
         cross_cond = self.cross_film(cond)
         ffn_cond = self.ffn_film(cond)
 
-        # temporal attention
-        ta_out, ta_weight = self._ta_block(x.transpose(1, 2).reshape(B * J, T, D),
-                                            mask=x_mask,
-                                            fixed_attn=temp_attn)
+        # Temporal attention
+        x_t = x.transpose(1, 2).reshape(B * J, T, D)
+        # x_mask_t = None if x_mask is None else x_mask.repeat_interleave(J, dim=0)
+        if style is not None:
+            S = style.size(-1)
+            style_t = style.unsqueeze(1).expand(B, J, S).reshape(B * J, S)         # [B*J, S]
+        else:
+            style_t = None
+
+        ta_out, ta_weight = self._ta_block(x_t, style=style_t, mask=x_mask, fixed_attn=temp_attn)
         ta_out = ta_out.reshape(B, J, T, D).transpose(1, 2)
         ta_out = featurewise_affine(ta_out, temp_cond)
         x = x + ta_out
 
-        # skeletal attention
-        sa_out, sa_weight = self._sa_block(x.reshape(B * T, J, D),
-                                            fixed_attn=skel_attn)
+        # Skeletal attention
+        x_s = x.reshape(B * T, J, D)
+        if style is not None:
+            style_s = style.unsqueeze(1).expand(B, T, S).reshape(B * T, S)         # [B*T, S]
+        else:
+            style_s = None
+
+        sa_out, sa_weight = self._sa_block(x_s, style=style_s, fixed_attn=skel_attn)
         sa_out = sa_out.reshape(B, T, J, D)
         sa_out = featurewise_affine(sa_out, skel_cond)
         x = x + sa_out
     
-        # cross attention
-        ca_out, ca_weight = self._ca_block(x.reshape(B, T * J, D),
-                                        memory,
-                                        mask=memory_mask,
-                                        fixed_attn=cross_attn)
+        # Cross attention
+        x_c = x.reshape(B, T * J, D)
+        ca_out, ca_weight = self._ca_block(x_c, memory, style=style, mask=memory_mask, fixed_attn=cross_attn)
         ca_out = ca_out.reshape(B, T, J, D)
         ca_out = featurewise_affine(ca_out, cross_cond)
         x = x + ca_out
 
-        # feed-forward
+        # Feed-forward
         ff_out = self._ff_block(x)
         ff_out = featurewise_affine(ff_out, ffn_cond)
         x = x + ff_out
 
         attn_weights = (sa_weight, ta_weight, ca_weight)
-
         return x, attn_weights
     
 
 class SkipTransformer(nn.Module):
-    def __init__(self, opt):
+    def __init__(self, config, opt):
         super(SkipTransformer, self).__init__()
         self.opt = opt
         if self.opt.n_layers % 2 != 1:
@@ -244,18 +263,18 @@ class SkipTransformer(nn.Module):
         
         # transformer encoder
         self.input_blocks = nn.ModuleList()
-        self.middle_block = STTransformerLayer(opt)
+        self.middle_block = STTransformerLayer(config, opt)
         self.output_blocks = nn.ModuleList()
         self.skip_blocks = nn.ModuleList()
 
         for i in range((self.opt.n_layers - 1) // 2):
-            self.input_blocks.append(STTransformerLayer(opt))
-            self.output_blocks.append(STTransformerLayer(opt))
+            self.input_blocks.append(STTransformerLayer(config, opt))
+            self.output_blocks.append(STTransformerLayer(config, opt))
             self.skip_blocks.append(nn.Linear(opt.latent_dim * 2, opt.latent_dim))
-        
+
 
     def forward(self, x, timestep_emb, word_emb, sa_mask=None, ca_mask=None, need_attn=False,
-                fixed_sa=None, fixed_ta=None, fixed_ca=None):
+                fixed_sa=None, fixed_ta=None, fixed_ca=None, style=None):
         """
         x: [B, T, J, D]
         timestep_emb: [B, D]
@@ -270,16 +289,16 @@ class SkipTransformer(nn.Module):
         # B, T, J, D = x.size()
         
         xs = []
-
         attn_weights = [[], [], []]
         layer_idx = 0
+
         for i, block in enumerate(self.input_blocks):
             sa = None if fixed_sa is None else fixed_sa[:, layer_idx]
             ta = None if fixed_ta is None else fixed_ta[:, layer_idx]
             ca = None if fixed_ca is None else fixed_ca[:, layer_idx]
 
             x, attns = block(x, word_emb, timestep_emb, x_mask=sa_mask, memory_mask=ca_mask,
-                             skel_attn=sa, temp_attn=ta, cross_attn=ca)
+                             skel_attn=sa, temp_attn=ta, cross_attn=ca, style=style)
             xs.append(x)
             for j in range(len(attn_weights)):
                 attn_weights[j].append(attns[j])
@@ -288,8 +307,9 @@ class SkipTransformer(nn.Module):
         sa = None if fixed_sa is None else fixed_sa[:, layer_idx]
         ta = None if fixed_ta is None else fixed_ta[:, layer_idx]
         ca = None if fixed_ca is None else fixed_ca[:, layer_idx]
+
         x, attns = self.middle_block(x, word_emb, timestep_emb, x_mask=sa_mask, memory_mask=ca_mask,
-                                     skel_attn=sa, temp_attn=ta, cross_attn=ca)
+                                     skel_attn=sa, temp_attn=ta, cross_attn=ca, style=style)
         
         for j in range(len(attn_weights)):
             attn_weights[j].append(attns[j])
@@ -304,7 +324,7 @@ class SkipTransformer(nn.Module):
             ca = None if fixed_ca is None else fixed_ca[:, layer_idx]
 
             x, attns = block(x, word_emb, timestep_emb, x_mask=sa_mask, memory_mask=ca_mask,
-                             skel_attn=sa, temp_attn=ta, cross_attn=ca)
+                             skel_attn=sa, temp_attn=ta, cross_attn=ca, style=style)
             
             for j in range(len(attn_weights)):
                 attn_weights[j].append(attns[j])

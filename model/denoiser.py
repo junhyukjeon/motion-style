@@ -32,7 +32,7 @@ class OutputProcess(nn.Module):
         return self.layers(x)
 
 class Denoiser(nn.Module):
-    def __init__(self, opt, vae_dim, use_style=True):
+    def __init__(self, config, opt, vae_dim, use_style=True):
         super(Denoiser, self).__init__()
 
         self.opt = opt
@@ -55,7 +55,7 @@ class Denoiser(nn.Module):
         self.pos_emb = PositionalEmbedding(self.latent_dim, opt.dropout)
 
         # transformer
-        self.transformer = SkipTransformer(opt, use_style=use_style)
+        self.transformer = SkipTransformer(config, opt)
 
         # cache for CLIP embedding
         self._cache_word_emb = None
@@ -78,7 +78,7 @@ class Denoiser(nn.Module):
         self._cache_tokens_pos = None
 
     def forward(self, x, timestep_emb, text, len_mask=None, need_attn=False,
-                fixed_sa=None, fixed_ta=None, fixed_ca=None, fixed_cs=None, style_embedding=None, use_cached_clip=False):
+                fixed_sa=None, fixed_ta=None, fixed_ca=None, fixed_cs=None, use_cached_clip=False, style=None):
 
         # Input process
         x = self.input_process(x)
@@ -105,7 +105,7 @@ class Denoiser(nn.Module):
         x = self.pos_emb.forward(x)
         x = x.reshape(B, T, J, D)
 
-        # Attention masks (?)
+        # Attention masks
         if len_mask is not None:
             len_mask = len_mask.repeat_interleave(J, dim=0)
 
@@ -119,7 +119,7 @@ class Denoiser(nn.Module):
             fixed_ta=fixed_ta,
             fixed_ca=fixed_ca,
             fixed_cs=fixed_cs,
-            style_embedding=style_embedding
+            style=style
         )
 
         # Output process

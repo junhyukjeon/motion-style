@@ -7,6 +7,10 @@ from model.networks import StyleEncoder
 from salad.models.vae.model import VAE
 from salad.utils.get_opt import get_opt
 
+from data.dataset import StyleDataset
+from data.sampler import SAMPLER_REGISTRY
+from model.networks import NETWORK_REGISTRY
+
 
 def load_vae(vae_opt):
     print(f'Loading VAE Model {vae_opt.name}')
@@ -32,7 +36,7 @@ def load_denoiser(opt, vae_dim):
 class Text2StylizedMotion(nn.Module):
     def __init__(self, opt, vae_dim):
         super(Text2StylizedMotion, self).__init__()
-        self.style_encoder = StyleEncoder(opt, vae_dim)
+        self.style_net = StyleEncoder(opt, vae_dim)
         self.denoiser = Denoiser(opt, vae_dim, use_style=True)
 
     def forward(self, x, timestep_emb, text, len_mask=None, need_attn=False):

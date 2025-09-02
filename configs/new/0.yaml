@@ -59,7 +59,7 @@ style_encoder:
 # --- Denoiser --- #
 denoiser:
   type: Denoiser
-
+  
 
 # --- HyperLoRA --- #
 style_dim: 256

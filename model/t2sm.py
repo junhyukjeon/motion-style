@@ -40,9 +40,12 @@ class Text2StylizedMotion(nn.Module):
         self.opt     = get_opt(f"checkpoints/{dataset_name}/{denoiser_name}/opt.txt", self.device)
         self.vae_opt = get_opt(f"checkpoints/{dataset_name}/{self.opt.vae_name}/opt.txt", self.device)
 
+        # Components
         self.vae           = load_vae(self.vae_opt).to(self.device)
         self.style_encoder = StyleContentNet(config['style_encoder'], opt).to(device)
         self.denoiser      = Denoiser(config['denoiser'], opt, vae_dim).to(device)
+
+        # Scheduler
         self.scheduler     = DDIMScheduler(
             num_train_timesteps=self.opt.num_train_timesteps,
             beta_start=self.opt.beta_start,
@@ -51,8 +54,45 @@ class Text2StylizedMotion(nn.Module):
             prediction_type=self.opt.prediction_type,
             clip_sample=False,
         )
+
         self.tokenizer = self.denoiser.clip_model.tokenizer
 
 
-    def forward(self, x, timestep_emb, text, len_mask=None, need_attn=False):
-        print()
+    def optimize(self, batch_data):
+        # Setup input
+        text, motion, m_lens = batch_data
+
+        # Random drop during training
+        text = [
+            "" if np.random.rand(1) < self.opt.cond_drop_prob else t for t in text
+        ]
+
+        # To device
+        motion   = motion.to(self.opt.device, dtype=torch.float32)
+        m_lens   = m_lens.to(self.opt.device, dtype=torch.long)
+        len_mask = lengths_to_mask(m_lens // 4)
+
+        # Latent
+        with torch.no_grad():
+            latent, _ = self.vae.encode(motion)
+            len_mask = F.pad(len_mask, (0, latent.shape[1] - len_mask.shape[1]), mode="constant", value=False)
+            latent = latent * len_mask[..., None, None].float()
+
+        # Sample diffusion timesteps
+        timesteps = torch.randint(
+            0,
+            self.opt.num_train_timesteps,
+            (latent.shape[0],),
+            device=latent.device,
+        ).long()
+
+        # Add noise
+        noise = torch.randn_like(latent)
+        noise = noise * len_mask[..., None, None].float()
+        noisy_latent = self.noise_scheduler.add_noise(latent, noise, timesteps)
+
+        # Predict the noise
+        pred, attn_list = self.denoiser.forward(noisy_latent, timesetps, text, len_mask=len_mask)
+        pred = pred * len_mask[..., None, None].float()
+
+        # Loss

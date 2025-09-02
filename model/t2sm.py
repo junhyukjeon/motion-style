@@ -34,10 +34,15 @@ def load_denoiser(opt, vae_dim):
 
 
 class Text2StylizedMotion(nn.Module):
-    def __init__(self, opt, vae_dim):
+    def __init__(self, config, opt, vae_dim):
         super(Text2StylizedMotion, self).__init__()
-        self.style_net = StyleEncoder(opt, vae_dim)
-        self.denoiser = Denoiser(opt, vae_dim, use_style=True)
+        self.device  = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        self.opt     = get_opt(f"checkpoints/{dataset_name}/{denoiser_name}/opt.txt", self.device)
+        self.vae_opt = get_opt(f"checkpoints/{dataset_name}/{self.opt.vae_name}/opt.txt", self.device)
+
+        self.vae           = load_vae(self.vae_opt).to(self.device)
+        self.style_encoder = NETWORK_REGISTRY[config['style_encoder']['type']](config['style_encoder']).to(device)
+        self.denoiser      = Denoiser(config, opt, vae_dim, use_style=True)
 
     def forward(self, x, timestep_emb, text, len_mask=None, need_attn=False):
         print()

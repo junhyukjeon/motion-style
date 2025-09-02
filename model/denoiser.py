@@ -125,3 +125,12 @@ class Denoiser(nn.Module):
         # Output process
         x = self.output_process(x)
         return x, attn_weights
+
+
+NETWORK_REGISTRY = {
+    "StyleContentDecoder": StyleContentDecoder,
+    "StyleContentEncoder": StyleContentEncoder,
+    "StyleContentNet": StyleContentNet,
+    "StyleContentEncoderTwo": StyleContentEncoderTwo,
+    "StyleContentDecoderTwo": StyleContentDecoderTwo
+}

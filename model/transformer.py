@@ -338,3 +338,8 @@ class SkipTransformer(nn.Module):
                 attn_weights[j] = None
 
         return x, attn_weights
+
+
+TRANSFORMER_REGISTRY = {
+    ""
+}

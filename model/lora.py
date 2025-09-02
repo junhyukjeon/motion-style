@@ -31,3 +31,8 @@ class HyperLoRA(nn.Module):
         tmp   = torch.einsum('bnd,brd->bnr', z, A)
         delta = torch.einsum('bod,bnr->bno', B, tmp)
         return self.scale * delta
+
+
+LORA_REGISTRY = {
+    "HyperLoRA": HyperLoRA
+}

@@ -6,6 +6,7 @@ from salad.model.denoiser.clip import FrozenCLIPTextEncoder
 from salad.model.denoiser.embedding import TimestepEmbedding, PositionalEmbedding
 from model.transformer import SkipTransformer
 
+
 class InputProcess(nn.Module):
     def __init__(self, opt, in_features):
         super(InputProcess, self).__init__()
@@ -17,6 +18,7 @@ class InputProcess(nn.Module):
 
     def forward(self, x):
         return self.layers(x)
+
 
 class OutputProcess(nn.Module):
     def __init__(self, opt, out_features):
@@ -31,13 +33,13 @@ class OutputProcess(nn.Module):
     def forward(self, x):
         return self.layers(x)
 
+
 class Denoiser(nn.Module):
-    def __init__(self, config, opt, vae_dim, use_style=True):
+    def __init__(self, config, opt, vae_dim):
         super(Denoiser, self).__init__()
 
         self.opt = opt
         self.latent_dim = opt.latent_dim
-        self.use_style = use_style
         self.clip_dim = 512 if opt.clip_version == "ViT-B/32" else 768 # ViT-L/14
 
         # input & output process
@@ -125,12 +127,3 @@ class Denoiser(nn.Module):
         # Output process
         x = self.output_process(x)
         return x, attn_weights
-
-
-NETWORK_REGISTRY = {
-    "StyleContentDecoder": StyleContentDecoder,
-    "StyleContentEncoder": StyleContentEncoder,
-    "StyleContentNet": StyleContentNet,
-    "StyleContentEncoderTwo": StyleContentEncoderTwo,
-    "StyleContentDecoderTwo": StyleContentDecoderTwo
-}

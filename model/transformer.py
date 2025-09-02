@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from salad.models.denoiser.transformer import MultiheadAttention
-from model.lora import HyperLoRA
+from model.lora import LORA_REGISTRY
 
 # --- Skip Transformer --- #
 def featurewise_affine(x, scale_shift):
@@ -42,10 +42,10 @@ class MultiheadAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
         lora_config = config["lora"]
-        self.q_lora = HyperLoRA(lora_config)
-        self.k_lora = HyperLoRA(lora_config)
-        self.v_lora = HyperLoRA(lora_config)
-        self.o_lora = HyperLoRA(lora_config)
+        self.q_lora = LORA_REGISTRY[lora_config['type']](lora_config)
+        self.k_lora = LORA_REGISTRY[lora_config['type']](lora_config)
+        self.v_lora = LORA_REGISTRY[lora_config['type']](lora_config)
+        self.o_lora = LORA_REGISTRY[lora_config['type']](lora_config)
 
     def forward(self, query, key, value, key_padding_mask=None, need_weights=True, average_attn_weights=False, style=None):
         """
@@ -338,8 +338,3 @@ class SkipTransformer(nn.Module):
                 attn_weights[j] = None
 
         return x, attn_weights
-
-
-TRANSFORMER_REGISTRY = {
-    ""
-}

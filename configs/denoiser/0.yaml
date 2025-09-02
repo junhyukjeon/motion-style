@@ -42,7 +42,6 @@ loss:
 
 # --- Style Encoder --- #
 style_encoder:
-  type: StyleContentNet
   style_content_encoder:
     type: StyleContentEncoderTwo
     latent_dim: 256
@@ -58,8 +57,9 @@ style_encoder:
 
 # --- Denoiser --- #
 denoiser:
-  type: Denoiser
-  
+  lora:
+    type: HyperLoRA
+
 
 # --- HyperLoRA --- #
 style_dim: 256

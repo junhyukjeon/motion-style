@@ -9,7 +9,7 @@ from salad.utils.get_opt import get_opt
 
 from data.dataset import StyleDataset
 from data.sampler import SAMPLER_REGISTRY
-from model.networks import NETWORK_REGISTRY
+from model.networks import StyleContentNet
 
 
 def load_vae(vae_opt):
@@ -41,8 +41,18 @@ class Text2StylizedMotion(nn.Module):
         self.vae_opt = get_opt(f"checkpoints/{dataset_name}/{self.opt.vae_name}/opt.txt", self.device)
 
         self.vae           = load_vae(self.vae_opt).to(self.device)
-        self.style_encoder = NETWORK_REGISTRY[config['style_encoder']['type']](config['style_encoder']).to(device)
-        self.denoiser      = Denoiser(config, opt, vae_dim, use_style=True)
+        self.style_encoder = StyleContentNet(config['style_encoder'], opt).to(device)
+        self.denoiser      = Denoiser(config['denoiser'], opt, vae_dim).to(device)
+        self.scheduler     = DDIMScheduler(
+            num_train_timesteps=self.opt.num_train_timesteps,
+            beta_start=self.opt.beta_start,
+            beta_end=self.opt.beta_end,
+            beta_schedule=self.opt.beta_schedule,
+            prediction_type=self.opt.prediction_type,
+            clip_sample=False,
+        )
+        self.tokenizer = self.denoiser.clip_model.tokenizer
+
 
     def forward(self, x, timestep_emb, text, len_mask=None, need_attn=False):
         print()

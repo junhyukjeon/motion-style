@@ -63,9 +63,9 @@ def loss_stylecon(config, model, out, labels=None):
 
 
 def loss_anchor(config, model, out, labels):
+    z = out["z_prime"]
     if z.dim() == 4:
         z = z.mean(dim=(1, 2)) 
-    z = out["z_prime"]
     return F.mse_loss(z[:8], torch.zeros_like(z[:8]))
 
 
@@ -77,6 +77,17 @@ def loss_magnitude(config, model, out, labels):
     return (norms - 1.0).pow(2).mean()
 
 
+def loss_diffusion(config, model, out, labels):
+    pred = out["pred"]
+    z0   = out["latent"]
+    eps  = out["noise"]
+    timesteps = out["latent"]
+    len_mask  = out["latent"]
+
+    if hasattr(scheduler.get)_velocity(z0, eps, timesteps)
+        target = scheduler.get_velocity
+    
+
 LOSS_REGISTRY = {
     "recon1": loss_recon1,
     "recon2": loss_recon2,
@@ -84,5 +95,8 @@ LOSS_REGISTRY = {
     "stylecon": loss_stylecon,
     "anchor": loss_anchor,
     "magnitude": loss_magnitude,
+    "l1": torch.nn.L1Loss(),
+    "l2": torch.nn.MSELoss(),
+    "smooth_l1": torch.nn.SmoothL1Loss(),
 }
     

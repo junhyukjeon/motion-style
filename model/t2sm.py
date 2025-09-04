@@ -2,14 +2,14 @@
 import torch
 import torch.nn as nn
 
-from model.denoiser import Denoiser
-from model.networks import StyleEncoder
-from salad.models.vae.model import VAE
-from salad.utils.get_opt import get_opt
-
+from diffusers import DDIMScheduler
 from data.dataset import StyleDataset
 from data.sampler import SAMPLER_REGISTRY
+from model.denoiser import Denoiser
 from model.networks import StyleContentNet
+from salad.models.vae.model import VAE
+from salad.utils.get_opt import get_opt
+from utils.train.loss import LOSS_REGISTRY
 
 
 def load_vae(vae_opt):
@@ -37,6 +37,7 @@ class Text2StylizedMotion(nn.Module):
     def __init__(self, config, opt, vae_dim):
         super(Text2StylizedMotion, self).__init__()
         self.device  = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        self.config  = config
         self.opt     = get_opt(f"checkpoints/{dataset_name}/{denoiser_name}/opt.txt", self.device)
         self.vae_opt = get_opt(f"checkpoints/{dataset_name}/{self.opt.vae_name}/opt.txt", self.device)
 
@@ -58,14 +59,24 @@ class Text2StylizedMotion(nn.Module):
         self.tokenizer = self.denoiser.clip_model.tokenizer
 
 
-    def optimize(self, batch_data):
+    def forward_train(self, batch):
         # Setup input
-        text, motion, m_lens = batch_data
+        # Hm... I guess there's a corresponding text for each motion sample inside the batch?
+        # For style embeddings I can use the motions in the same batch... maybe?
+        text, motion, m_lens = batch
 
-        # Random drop during training
+        # Random drop for text
         text = [
-            "" if np.random.rand(1) < self.opt.cond_drop_prob else t for t in text
+            "" if np.random.rand(1) < self.config['text_drop'] else t for t in text
         ]
+
+        # Style embedding
+        with torch.no_grad():
+            style = self.style_encoder.encode(motion)
+        
+        # Random drop for style
+        if np.random.rand() < self.config['style_drop']:
+            style = torch.zeros_like(style)
 
         # To device
         motion   = motion.to(self.opt.device, dtype=torch.float32)
@@ -96,3 +107,40 @@ class Text2StylizedMotion(nn.Module):
         pred = pred * len_mask[..., None, None].float()
 
         # Loss
+        loss_dict = {}
+        loss = 0
+        if self.opt.prediction_type == "sample":
+            loss_sample = self.recon_criterion(pred, latent)
+            loss += loss_sample
+            loss_dict["loss_sample"] = loss_sample
+
+        elif self.opt.prediction_type == "epsilon":
+            loss_eps = self.recon_criterion(pred, noise)
+            loss += loss_eps
+            loss_dict["loss_eps"] = loss_eps
+
+        elif self.opt.prediction_type == "v_prediction":
+            vel = self.noise_scheduler.get_velocity(latent, noise, timesteps)
+            loss_vel = self.recon_criterion(pred, vel)
+            loss += loss_vel
+            loss_dict["loss_vel"] = loss_vel
+
+        return {
+            "pred": pred,
+            "latent": latent,
+            "noise": noise,
+            "timesteps": timesteps,
+            "len_mask": len_mask,
+            "attn": attn_list,
+            "text": text,
+            "style": style,
+        }
+
+    
+    def denoiser_step(model, batch, )
+        model.train()
+        model.style_encoder.eval()
+        set_requires_grad(model)
+
+
+    def style_step(model, batch, )

@@ -29,161 +29,6 @@ from utils.train.loss_scaler import LossScaler
 from utils.plot import plot_tsne
 
 
-def compute_raw_losses(loss_fns, loss_cfg, model, out, labels):
-    """
-    Returns: dict[name] = (None, raw_loss_tensor)
-    - Keeps 'style' and 'content' separate if your 'stylecon' fn returns two parts.
-    - No weighting or normalization here.
-    """
-    losses = {}
-    for name, fn in loss_fns.items():
-        spec = loss_cfg[name]
-        if name == "stylecon":
-            style_loss, content_loss = fn(spec, model, out, labels)
-            losses["style"]   = (None, style_loss)
-            losses["content"] = (None, content_loss)
-        else:
-            val = fn(spec, model, out, labels)
-            losses[name] = (None, val)
-    return losses
-
-
-def get_weight(loss_name, loss_cfg):
-    if loss_name in loss_cfg and "weight" in loss_cfg[loss_name]:
-        return float(loss_cfg[loss_name]["weight"])
-    if loss_name in ("style", "content") and "stylecon" in loss_cfg:
-        return float(loss_cfg["stylecon"].get("weight", 1.0))
-    return float(loss_cfg.get("scaler", {}).get("default_weight", 1.0))
-
-
-def calibrate(model, train_loader, device, loss_cfg, loss_fns, scaler, optimizer, K=500):
-    """
-    Runs K *training* steps (with updates) and simultaneously collects calibration stats
-    from raw losses. After K steps, freezes denominators.
-    """
-    model.train()
-    scaler.begin_calibration()
-
-    pbar = tqdm(zip(range(K), train_loader), total=K, desc=f"[Burn-in Calib] K={K}")
-    for _, (motions, labels, contents, _) in pbar:
-        motions, labels = motions.to(device), labels.to(device)
-        out = model.encode(motions)
-        raw_losses = compute_raw_losses(loss_fns, loss_cfg, model, out, labels)
-        scaler.accumulate_calibration(raw_losses)
-
-        total_unscaled = None
-        for name, (_, raw) in raw_losses.items():
-            w = get_weight(name, loss_cfg)
-            total_unscaled = raw*w if total_unscaled is None else total_unscaled + raw*w
-
-        optimizer.zero_grad(set_to_none=True)
-        total_unscaled.backward()
-        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_grad)
-        optimizer.step()
-
-    scaler.end_calibration(use="rms", tau=1e-3)
-    print("📏 Burn-in calibration complete. Frozen denominators:", scaler.frozen_denom)
-
-
-def train(model, loader, device, loss_cfg, loss_fns, scaler, optimizer, writer=None, epoch=None, clip_grad=5.0):
-    model.train()
-    losses_scaled_sum = defaultdict(float)
-    losses_raw_sum    = defaultdict(float)
-
-    pbar = tqdm(loader, desc=f"[Train] Epoch {epoch}")
-    b_idx = -1
-    for b_idx, (motions, labels, contents, _) in enumerate(pbar):
-        motions, labels = motions.to(device), labels.to(device)
-
-        # Forward
-        out = model.encode(motions)
-
-        # 1) raw losses (no weights here)
-        raw_losses = compute_raw_losses(loss_fns, loss_cfg, model, out, labels)
-
-        # 2) normalize + weight via LossScaler (updates EMAs internally)
-        losses, total_loss = scaler.normalize_and_weight(raw_losses, train=True)
-
-        # 3) safety
-        if not torch.isfinite(total_loss):
-            pbar.set_postfix(loss=float("nan"))
-            optimizer.zero_grad(set_to_none=True)
-            continue
-
-        # 4) backward + step
-        optimizer.zero_grad(set_to_none=True)
-        total_loss.backward()
-        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_grad)
-        optimizer.step()
-
-        # 5) tqdm
-        unique_contents = set(contents)
-        pbar.set_postfix(loss=total_loss.item(), contents=list(unique_contents))
-
-        # 6) accumulate per-loss sums for epoch averages
-        for name, (scaled, raw) in losses.items():
-            losses_scaled_sum[name] += scaled.item()
-            losses_raw_sum[name]    += raw.item()
-
-        if MAX_TRAIN_BATCHES is not None and (b_idx + 1) >= MAX_TRAIN_BATCHES:
-            break
-
-    # epoch averages
-    num_batches = max(b_idx + 1, 1)
-    train_total_scaled = sum(losses_scaled_sum.values()) / max(num_batches, 1)
-    train_total_raw = sum(losses_raw_sum.values()) / max(num_batches, 1)
-
-    if writer is not None and epoch is not None:
-        writer.add_scalar("Train/Raw/Total", train_total_raw, epoch)
-        writer.add_scalar("Train/Scaled/Total", train_total_scaled, epoch)
-        for name in losses_scaled_sum.keys():
-            writer.add_scalar(f"Train/Raw/{name}",    losses_raw_sum[name]    / max(num_batches,1), epoch)
-            writer.add_scalar(f"Train/Scaled/{name}", losses_scaled_sum[name] / max(num_batches,1), epoch)
-
-    return train_total_scaled, train_total_raw
-
-
-def validate(model, loader, device, loss_cfg, loss_fns, scaler, writer=None, epoch=None):
-    model.eval()
-    losses_scaled_sum = defaultdict(float)
-    losses_raw_sum    = defaultdict(float)
-
-    with torch.no_grad():
-        pbar = tqdm(loader, desc=f"[Valid] Epoch {epoch}")
-        b_idx = -1
-        for b_idx, (motions, labels, contents, _) in enumerate(pbar):
-            motions, labels = motions.to(device), labels.to(device)
-            out = model.encode(motions)
-
-            raw_losses = compute_raw_losses(loss_fns, loss_cfg, model, out, labels) # Pure raw loss values. Check loss functions.
-            losses, total_loss = scaler.normalize_and_weight(raw_losses, train=False) # Normalized and weighted losses, and sum.
-
-            if not torch.isfinite(total_loss):
-                pbar.set_postfix(loss=float("nan"))
-                continue
-
-            pbar.set_postfix(loss=total_loss.item())
-            for name, (scaled, raw) in losses.items():
-                losses_scaled_sum[name] += scaled.item()
-                losses_raw_sum[name]    += raw.item()
-
-            if MAX_TRAIN_BATCHES is not None and (b_idx + 1) >= MAX_TRAIN_BATCHES:
-                break
-
-    num_batches = max(b_idx + 1, 1)
-    valid_total_scaled = sum(losses_scaled_sum.values()) / max(num_batches, 1)
-    valid_total_raw = sum(losses_raw_sum.values()) / max(num_batches, 1)
-
-    if writer is not None and epoch is not None:
-        writer.add_scalar("Valid/Raw/Total", valid_total_raw, epoch)
-        writer.add_scalar("Valid/Scaled/Total", valid_total_scaled, epoch)
-        for name in losses_scaled_sum.keys():
-            writer.add_scalar(f"Valid/Raw/{name}",    losses_raw_sum[name]    / max(num_batches,1), epoch)
-            writer.add_scalar(f"Valid/Scaled/{name}", losses_scaled_sum[name] / max(num_batches,1), epoch)
-
-    return valid_total_scaled, valid_total_raw
-
-
 def load_config():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, required=True, help='Path to config file (YAML)')
@@ -277,7 +122,6 @@ if __name__ == "__main__":
     WARMUP_BATCHES = 100
     scaler = LossScaler(loss_cfg, alpha=ALPHA, eps=NORM_EPS, warmup=WARMUP_BATCHES)
 
-    #####################
     MAX_TRAIN_BATCHES = 1000000
 
     best_val_loss = float('inf')
@@ -286,9 +130,6 @@ if __name__ == "__main__":
     calibrate(model, train_loader, device, loss_cfg, loss_fns, scaler, optimizer, K=2000)
 
     for epoch in range(1, config['epochs'] + 1):
-        # train_sampler.generate_batches()
-        # valid_sampler.generate_batches()
-
         # --- Train ---
         train_scaled, train_raw = train(
             model=model,

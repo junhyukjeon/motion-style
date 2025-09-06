@@ -6,7 +6,7 @@ from diffusers import DDIMScheduler
 from data.dataset import StyleDataset
 from data.sampler import SAMPLER_REGISTRY
 from model.denoiser import Denoiser
-from model.networks import StyleContentNet
+from model.style_encoder import StyleEncoder
 from salad.models.vae.model import VAE
 from salad.utils.get_opt import get_opt
 from utils.train.loss import LOSS_REGISTRY
@@ -109,21 +109,7 @@ class Text2StylizedMotion(nn.Module):
         # Loss
         loss_dict = {}
         loss = 0
-        if self.opt.prediction_type == "sample":
-            loss_sample = self.recon_criterion(pred, latent)
-            loss += loss_sample
-            loss_dict["loss_sample"] = loss_sample
-
-        elif self.opt.prediction_type == "epsilon":
-            loss_eps = self.recon_criterion(pred, noise)
-            loss += loss_eps
-            loss_dict["loss_eps"] = loss_eps
-
-        elif self.opt.prediction_type == "v_prediction":
-            vel = self.noise_scheduler.get_velocity(latent, noise, timesteps)
-            loss_vel = self.recon_criterion(pred, vel)
-            loss += loss_vel
-            loss_dict["loss_vel"] = loss_vel
+        
 
         return {
             "pred": pred,

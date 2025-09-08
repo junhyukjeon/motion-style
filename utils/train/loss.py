@@ -14,7 +14,6 @@ def loss_recon2(config, model, out, labels):
 def loss_supcon(config, model, out, labels):
     temperature = config['temperature']
     anchor = config['anchor']
-
     z = out['z_prime']
 
     if z.dim() == 4:
@@ -40,13 +39,12 @@ def loss_supcon(config, model, out, labels):
     exp_sim = torch.exp(sim) * logits_mask
     log_prob = sim - torch.log(exp_sim.sum(dim=1, keepdim=True) + 1e-8)
     mean_log_prob_pos = (pos_mask.float() * log_prob).sum(dim=1) / (pos_mask.sum(dim=1) + 1e-8)
-
     return -mean_log_prob_pos.mean()
 
 
 def loss_stylecon(config, model, out, labels=None):
-    z_style   = out['z_style']     # [B, ...]
-    z_content = out['z_content']   # [B, ...]
+    z_style   = out['z_style']
+    z_content = out['z_content']
     B = z_style.shape[0]
     perm = torch.randperm(B, device=z_style.device)
 
@@ -58,7 +56,6 @@ def loss_stylecon(config, model, out, labels=None):
 
     style_loss    = F.mse_loss(new_s['z_style'], z_style[perm].detach())
     content_loss  = F.mse_loss(new_c['z_content'], z_content.detach()) 
-
     return style_loss, content_loss
 
 
@@ -72,20 +69,19 @@ def loss_anchor(config, model, out, labels):
 def loss_magnitude(config, model, out, labels):
     z = out["z_style"]
     z = z[8:]
-
     norms = z.norm(dim=-1)
     return (norms - 1.0).pow(2).mean()
 
 
-def loss_diffusion(config, model, out, labels):
-    pred = out["pred"]
-    z0   = out["latent"]
-    eps  = out["noise"]
-    timesteps = out["latent"]
-    len_mask  = out["latent"]
+# def loss_diffusion(config, model, out, labels):
+#     pred      = out["pred"]
+#     z0        = out["latent"]
+#     eps       = out["noise"]
+#     timesteps = out["latent"]
+#     len_mask  = out["latent"]
 
-    if hasattr(scheduler.get)_velocity(z0, eps, timesteps)
-        target = scheduler.get_velocity
+#     if hasattr(scheduler.get)_velocity(z0, eps, timesteps)
+#         target = scheduler.get_velocity
     
 
 LOSS_REGISTRY = {
@@ -95,8 +91,8 @@ LOSS_REGISTRY = {
     "stylecon": loss_stylecon,
     "anchor": loss_anchor,
     "magnitude": loss_magnitude,
-    "l1": torch.nn.L1Loss(),
-    "l2": torch.nn.MSELoss(),
-    "smooth_l1": torch.nn.SmoothL1Loss(),
+    # "l1": torch.nn.L1Loss(),
+    # "l2": torch.nn.MSELoss(),
+    # "smooth_l1": torch.nn.SmoothL1Loss(),
 }
     

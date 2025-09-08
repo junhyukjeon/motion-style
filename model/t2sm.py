@@ -1,12 +1,12 @@
 # --- Imports ---
 import torch
 import torch.nn as nn
-
 from diffusers import DDIMScheduler
-from data.dataset import StyleDataset
-from data.sampler import SAMPLER_REGISTRY
+from os.path import join as pjoin
+
+from data.dataset import TextStyleDataset
 from model.denoiser import Denoiser
-from model.style_encoder import StyleEncoder
+from model.style import STYLE_REGISTRY
 from salad.models.vae.model import VAE
 from salad.utils.get_opt import get_opt
 from utils.train.loss import LOSS_REGISTRY
@@ -34,17 +34,18 @@ def load_denoiser(opt, vae_dim):
 
 
 class Text2StylizedMotion(nn.Module):
-    def __init__(self, config, opt, vae_dim):
+    def __init__(self, config):
         super(Text2StylizedMotion, self).__init__()
         self.device  = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
         self.config  = config
-        self.opt     = get_opt(f"checkpoints/{dataset_name}/{denoiser_name}/opt.txt", self.device)
-        self.vae_opt = get_opt(f"checkpoints/{dataset_name}/{self.opt.vae_name}/opt.txt", self.device)
+        self.opt     = get_opt(f"checkpoints/t2m/t2m_denoiser_vpred_vaegelu/opt.txt", self.device)
+        self.vae_opt = get_opt("checkpoints/t2m/t2m_vae_gelu/opt.txt", self.device)
 
         # Components
         self.vae           = load_vae(self.vae_opt).to(self.device)
-        self.style_encoder = StyleContentNet(config['style_encoder'], opt).to(device)
-        self.denoiser      = Denoiser(config['denoiser'], opt, vae_dim).to(device)
+        self.style_encoder = STYLE_REGISTRY[config['style_encoder']['type']](config['style_encoder']).to(self.device)
+        self.denoiser      = Denoiser(config['denoiser'], self.opt, self.vae_opt.latent_dim).to(self.device)
+        self.tokenizer     = self.denoiser.clip_model.tokenizer
 
         # Scheduler
         self.scheduler     = DDIMScheduler(
@@ -56,14 +57,8 @@ class Text2StylizedMotion(nn.Module):
             clip_sample=False,
         )
 
-        self.tokenizer = self.denoiser.clip_model.tokenizer
-
-
-    def forward_train(self, batch):
-        # Setup input
-        # Hm... I guess there's a corresponding text for each motion sample inside the batch?
-        # For style embeddings I can use the motions in the same batch... maybe?
-        text, motion, m_lens = batch
+    def optimize(self, batch):
+        motion, caption, style_idx = batch
 
         # Random drop for text
         text = [
@@ -80,7 +75,7 @@ class Text2StylizedMotion(nn.Module):
 
         # To device
         motion   = motion.to(self.opt.device, dtype=torch.float32)
-        m_lens   = m_lens.to(self.opt.device, dtype=torch.long)
+        # m_lens   = m_lens.to(self.opt.device, dtype=torch.long)
         len_mask = lengths_to_mask(m_lens // 4)
 
         # Latent
@@ -109,7 +104,6 @@ class Text2StylizedMotion(nn.Module):
         # Loss
         loss_dict = {}
         loss = 0
-        
 
         return {
             "pred": pred,
@@ -121,12 +115,3 @@ class Text2StylizedMotion(nn.Module):
             "text": text,
             "style": style,
         }
-
-    
-    def denoiser_step(model, batch, )
-        model.train()
-        model.style_encoder.eval()
-        set_requires_grad(model)
-
-
-    def style_step(model, batch, )

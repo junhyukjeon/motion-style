@@ -20,9 +20,9 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from matplotlib.colors import to_rgb
 
-from data.dataset import StyleDataset
+from data.dataset import TextStyleDataset
 from data.sampler import SAMPLER_REGISTRY
-from model.networks import NETWORK_REGISTRY
+from model.t2sm import Text2StylizedMotion
 from utils.train.early_stop import EarlyStopper
 from utils.train.loss import LOSS_REGISTRY
 from utils.train.loss_scaler import LossScaler
@@ -56,46 +56,23 @@ def set_seed(seed=42):
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = load_config()
+    set_seed(config["random_seed"])
 
     # --- Result directories ---
     os.makedirs(config["result_dir"], exist_ok=True)
     os.makedirs(os.path.join(config["result_dir"], "valid"), exist_ok=True)
     writer = SummaryWriter(log_dir=os.path.join("./results/tensorboard", config["run_name"]))
-    
-    set_seed(config["random_seed"])
-
-    # --- Dataset Stats ---
-    MEAN = np.load(config["mean_path"])
-    STD = np.load(config["std_path"])
 
     # --- Style Split ---
-    with open(config["style_json"]) as f:
-        full_label_to_ids = json.load(f)
-
-    all_styles_sorted = sorted(full_label_to_ids.keys())
-    global_style_to_label = {style: i for i, style in enumerate(all_styles_sorted)}
-    global_label_to_style = {i: style for style, i in global_style_to_label.items()}
-
-    non_neutral_styles = [s for s in all_styles_sorted if s != "Neutral"]
-    train_styles, valid_styles = train_test_split(non_neutral_styles, test_size=config['valid_size'], random_state=config["random_seed"])
-    train_styles.append("Neutral")
-    valid_styles.append("Neutral")
-
-    train_label_to_ids = {style: full_label_to_ids[style] for style in train_styles}
-    valid_label_to_ids = {style: full_label_to_ids[style] for style in valid_styles}
-
-    # --- Content Mapping ---
-    with open(config["content_json"]) as f:
-        content_to_ids = json.load(f)
-    
-    ids_to_content = {}
-    for content_type, motion_ids in content_to_ids.items():
-        for m_id in motion_ids:
-            ids_to_content[m_id] = content_type
+    with open(config["dataset"]["style_json"]) as f:
+        styles_to_ids = json.load(f)
+    styles_sorted = sorted(styles_to_ids.keys())
+    train_styles, valid_styles = train_test_split(styles_sorted, test_size=config['valid_size'], random_state=config["random_seed"])
 
     # --- Dataset & Loader ---
-    train_dataset = StyleDataset(config["motion_dir"], MEAN, STD, config["window_size"], train_label_to_ids, global_style_to_label, ids_to_content)
-    valid_dataset = StyleDataset(config["motion_dir"], MEAN, STD, config["window_size"], valid_label_to_ids, global_style_to_label, ids_to_content)
+    dataset_cfg = config['dataset']
+    train_dataset = TextStyleDataset(dataset_cfg, train_styles, split="train");
+    valid_dataset = TextStyleDataset(dataset_cfg, valid_styles)
 
     sampler_cfg = config['sampler']
     train_sampler = SAMPLER_REGISTRY[sampler_cfg['type']](sampler_cfg, train_dataset)
@@ -106,7 +83,10 @@ if __name__ == "__main__":
 
     # --- Model, Optimizer, Loss ---
     model_cfg = config['model']
-    model = NETWORK_REGISTRY[model_cfg['type']](model_cfg).to(device)
+    model = Text2StylizedMotion(model_cfg).to(device)
+
+    import pdb; pdb.set_trace()
+
     optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'])
 
     loss_cfg = config['loss'] 

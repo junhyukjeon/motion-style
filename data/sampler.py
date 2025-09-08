@@ -2,6 +2,57 @@ import random
 from collections import defaultdict
 from torch.utils.data import BatchSampler
 
+
+class TrainSampler(BatchSampler):
+    def __init__(self, config, dataset):
+        self.config = config
+        self.dataset = dataset
+        self.batch_size = config['batch_size']
+        self.samples_per_style = config['samples_per_style']
+
+        self.styles_to_motions = defaultdict(list)
+        for motion_idx, item in enumerate(dataset.items):
+            style_idx = item["style_idx"]
+            self.styles_to_motions[style_idx].append(motion_idx)
+
+        self.styles_to_frames = defaultdict(list)
+        cumsum = dataset.cumsum
+        for style_idx, motion_idcs in self.styles_to_motions.items():
+            for motion_idx in motion_idcs:
+                start = cumsum[motion_idx]
+                end   = cumsum[motion_idx + 1]
+                if end > start:
+                    self.styles_to_frames[style_idx].append((start, end))
+
+        self.styles = [style for style, ranges in self.styles_to_frames.items() if ranges]
+        self.generate_batches()
+
+    def generate_batches(self):
+        self.batches = []
+        num_batches = len(self.dataset) // self.batch_size
+
+        for _ in range(num_batches):
+            styles_per_batch = self.batch_size // self.samples_per_style
+            selected_styles = random.sample(self.styles, styles_per_batch)
+
+            batch = []
+            for style in selected_styles:
+                ranges = self.styles_to_frames[style]
+                for _ in range(self.samples_per_style):
+                    r_start, r_end = random.choice(ranges)
+                    frame_idx = random.randrange(r_start, r_end)
+                    batch.append(frame_idx)
+            self.batches.append(batch)
+
+    def __iter__(self):
+        self.generate_batches()
+        random.shuffle(self.batches)
+        return iter(self.batches)
+
+    def __len__(self):
+        return len(self.batches)
+
+
 class StyleSampler(BatchSampler):
     def __init__(self, config, dataset):
         self.config = config
@@ -18,7 +69,7 @@ class StyleSampler(BatchSampler):
         for label, motion_indices in self.label_to_motion_indices.items():
             for m_idx in motion_indices:
                 start = cumsum[m_idx]
-                end = cumsum[m_idx + 1]
+                end   = cumsum[m_idx + 1]
                 self.label_to_frame_indices[label].extend(range(start, end))
 
         self.labels = [label for label in self.label_to_frame_indices if len(self.label_to_frame_indices[label]) >= self.samples_per_class]
@@ -226,7 +277,7 @@ class StyleContentSampler(BatchSampler):
     def __len__(self):
         return len(self.batches)
 
-        
+
 class RandomStyleSampler(BatchSampler):
     def __init__(self, config, dataset):
         self.config = config
@@ -272,6 +323,7 @@ class RandomStyleSampler(BatchSampler):
 
 
 SAMPLER_REGISTRY = {
+    "TrainSampler": TrainSampler,
     "StyleSampler": StyleSampler,
     "TwoStyleSampler": TwoStyleSampler,
     "StyleContentSampler": StyleContentSampler,

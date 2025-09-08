@@ -4,6 +4,7 @@ result_dir: ./results
 checkpoint_dir: ./checkpoints/sc
 random_seed: 42
 
+
 # --- Dataset --- #
 dataset:
   motion_dir  : ./dataset/100style/new_joint_vecs
@@ -13,51 +14,51 @@ dataset:
   style_json  : ./dataset/100style/100style_clean_clean.json
   window_size : 64
 
+
 # --- Sampler Settings --- #
 sampler:
-  type: StyleSampler
+  type: TrainSampler
   batch_size: 32
-  samples_per_class: 8
+  samples_per_style: 8
+
 
 # --- Training Hyperparameters --- #
 epochs: 100
 lr: 0.001
 text_drop: 0.1
 style_drop: 0.1
+valid_size: 0.2
+
 
 # --- Losses --- #
-loss:
-  diffusion:
-    criterion:
+# loss:
+#   velocity:
+#     criterion:
+#   supcon:
 
-# --- Style Encoder --- #
-style_encoder:
-  style_content_encoder:
-    type: StyleContentEncoderTwo
-    latent_dim: 256
-    n_heads: 4
+# --- Model --- #
+model:
+  denoiser:
+    lora:
+      type: HyperLoRA
+      rank: 8
+      scale: 1.0
+      style_dim: 256
+      in_dim: 256
+      out_dim: 256
+      hidden_dim: 512
+  style_encoder:
+    type: StyleTransformer
     dropout: 0.1
-    n_layers: 2
-  style_content_decoder:
-    type: StyleContentDecoderTwo
-    latent_dim: 256
-    n_heads: 4
-    dropout: 0.1
-    n_layers: 2
+    style_dim: 256
+    num_layers: 2
+    num_queries: 4
+    block:
+      dropout: 0.1
+      style_dim: 256
+      hidden_dim: 256
+      num_heads: 8
 
-# --- Denoiser --- #
-denoiser:
-  lora:
-    type: HyperLoRA
-    rank: 
-    scale:
-    style_dim:
-    in_dim:
-    out_dim:
-    hidden_dim:
-
-# --- HyperLoRA --- #
-style_dim: 256
 
 # --- Early Stopper --- #
 early:

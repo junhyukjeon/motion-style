@@ -239,8 +239,6 @@ if __name__ == "__main__":
     reset_dir(output_dir)
 
     # === [1] Load reference style motion
-    # style_idx = 1540217
-    # style_idx = 815700
     style_idx = 0
     style_motion, _, _, style_motion_id = dataset[style_idx]
     style_motion = style_motion.unsqueeze(0).to(device)  # [1, T, J, D]
@@ -279,9 +277,9 @@ if __name__ == "__main__":
 
         with torch.no_grad():
             out = model.encode(motions)
-            z_style = out["z_style"]
+            z_style   = out["z_style"]
             z_content = out["z_content"]
-            z_latent = out["z_latent"]
+            z_latent  = out["z_latent"]
 
             z_recon = model.decode(z_style, z_content)
             z_swap  = model.decode(z_style_swap, z_content)

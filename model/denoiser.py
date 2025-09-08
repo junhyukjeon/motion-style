@@ -2,8 +2,8 @@ from typing import List
 import torch
 import torch.nn as nn
 
-from salad.model.denoiser.clip import FrozenCLIPTextEncoder
-from salad.model.denoiser.embedding import TimestepEmbedding, PositionalEmbedding
+from salad.models.denoiser.clip import FrozenCLIPTextEncoder
+from salad.models.denoiser.embedding import TimestepEmbedding, PositionalEmbedding
 from model.transformer import SkipTransformer
 
 

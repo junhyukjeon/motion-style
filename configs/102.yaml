@@ -42,6 +42,7 @@ model:
     transformer:
       layer:
         attention:
+        film:
           lora:
             type: HyperLoRA
             rank: 8
@@ -49,8 +50,7 @@ model:
             style_dim: 256
             in_dim: 256
             out_dim: 256
-            hidden_dim: 512
-        film: 
+            hidden_dim: 512  
   style_encoder: 
     type: StyleTransformer
     dropout: 0.1

@@ -57,7 +57,7 @@ class Denoiser(nn.Module):
         self.pos_emb = PositionalEmbedding(self.latent_dim, opt.dropout)
 
         # transformer
-        self.transformer = SkipTransformer(config, opt)
+        self.transformer = SkipTransformer(config["transformer"], opt)
 
         # cache for CLIP embedding
         self._cache_word_emb = None

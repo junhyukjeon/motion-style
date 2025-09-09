@@ -12,20 +12,29 @@ def featurewise_affine(x, scale_shift):
 
 
 class DenseFiLM(nn.Module):
-    def __init__(self, opt):
+    def __init__(self, config, opt):
         super(DenseFiLM, self).__init__()
         self.linear = nn.Sequential(
             nn.SiLU(),
             nn.Linear(opt.latent_dim, opt.latent_dim * 2),
         )
 
-    def forward(self, cond):
-        """
-        cond: [B, D]
-        """
-        cond = self.linear(cond)
-        cond = cond[:, None, None, :] # unsqueeze for skeleto-temporal dimensions
-        scale, shift = cond.chunk(2, dim=-1)
+        if config["lora"]:
+            lora_config = config["lora"]
+            self.lora = LORA_REGISTRY[lora_config['type']](lora_config)
+
+    def forward(self, cond, style=None):
+        x  = self.linear[0](cond)
+        y0 = self.linear[1](x)
+
+        if (self.lora is not None) and (style is not None):
+            delta = self.lora(x.unsqueeze(1), style).squeeze(1)
+            y = y0 + delta
+        else:
+            y = y0
+
+        y = y[:, None, None, :]
+        scale, shift = y.chunk(2, dim=-1)
         return scale, shift
 
 
@@ -40,12 +49,15 @@ class MultiheadAttention(nn.Module):
         self.head_dim = d_model // n_heads
         self.batch_first = batch_first
         self.dropout = nn.Dropout(dropout)
+        self.use_lora = False
 
-        lora_config = config["lora"]
-        self.q_lora = LORA_REGISTRY[lora_config['type']](lora_config)
-        self.k_lora = LORA_REGISTRY[lora_config['type']](lora_config)
-        self.v_lora = LORA_REGISTRY[lora_config['type']](lora_config)
-        self.o_lora = LORA_REGISTRY[lora_config['type']](lora_config)
+        if config["lora"]:
+            lora_cfg = config["lora"]
+            self.q_lora = LORA_REGISTRY[lora_cfg['type']](lora_cfg)
+            self.k_lora = LORA_REGISTRY[lora_cfg['type']](lora_cfg)
+            self.v_lora = LORA_REGISTRY[lora_cfg['type']](lora_cfg)
+            self.o_lora = LORA_REGISTRY[lora_cfg['type']](lora_cfg)
+            self.use_lora = True
 
     def forward(self, query, key, value, key_padding_mask=None, need_weights=True, average_attn_weights=False, style=None):
         """
@@ -66,7 +78,7 @@ class MultiheadAttention(nn.Module):
         v = self.Wv(v_in)
 
         # LoRA
-        if style is not None:
+        if self.use_lora and style is not None:
             q = q + self.q_lora(q_in, style)
             k = k + self.k_lora(k_in, style)
             v = v + self.v_lora(v_in, style)
@@ -89,7 +101,7 @@ class MultiheadAttention(nn.Module):
 
         # Output projection (+ optional O-LoRA; uses post-attn features as input)
         out = self.Wo(attn_output)
-        if style is not None:
+        if self.use_lora and style is not None:
             out = out + self.o_lora(attn_output, style)
 
         if need_weights:
@@ -109,7 +121,7 @@ class MultiheadAttention(nn.Module):
         # Linear transformation
         v_in = value
         v = self.Wv(v_in)
-        if style is not None:
+        if self.use_lora and style is not None:
             v = v + self.v_lora(v_in, style)
         v = v.view(B, T2, self.n_heads, self.head_dim).transpose(1, 2)  # [B,H,T2,dh]
 
@@ -119,7 +131,7 @@ class MultiheadAttention(nn.Module):
 
         # Output projection (+ optional O-LoRA; uses post-attn features as input)
         out = self.Wo(attn_output)
-        if style is not None:
+        if self.use_lora and style is not None:
             out = out + self.o_lora(attn_output, style)
 
         return out, attn_weights
@@ -135,17 +147,17 @@ class STTransformerLayer(nn.Module):
         self.opt = opt
         
         # skeletal attention
-        self.skel_attn = MultiheadAttention(config, opt.latent_dim, opt.n_heads, opt.dropout, batch_first=True)
+        self.skel_attn = MultiheadAttention(config["attention"], opt.latent_dim, opt.n_heads, opt.dropout, batch_first=True)
         self.skel_norm = nn.LayerNorm(opt.latent_dim)
         self.skel_dropout = nn.Dropout(opt.dropout)
 
         # temporal attention
-        self.temp_attn = MultiheadAttention(config, opt.latent_dim, opt.n_heads, opt.dropout, batch_first=True)
+        self.temp_attn = MultiheadAttention(config["attention"], opt.latent_dim, opt.n_heads, opt.dropout, batch_first=True)
         self.temp_norm = nn.LayerNorm(opt.latent_dim)
         self.temp_dropout = nn.Dropout(opt.dropout)
 
         # cross attention
-        self.cross_attn = MultiheadAttention(config, opt.latent_dim, opt.n_heads, opt.dropout, batch_first=True)
+        self.cross_attn = MultiheadAttention(config["attention"], opt.latent_dim, opt.n_heads, opt.dropout, batch_first=True)
         self.cross_src_norm = nn.LayerNorm(opt.latent_dim)
         self.cross_tgt_norm = nn.LayerNorm(opt.latent_dim)
         self.cross_dropout = nn.Dropout(opt.dropout)
@@ -160,10 +172,10 @@ class STTransformerLayer(nn.Module):
         self.act = F.relu if opt.activation == "relu" else F.gelu
 
         # FiLM
-        self.skel_film = DenseFiLM(opt)
-        self.temp_film = DenseFiLM(opt)
-        self.cross_film = DenseFiLM(opt)
-        self.ffn_film = DenseFiLM(opt)
+        self.skel_film = DenseFiLM(config['film'], opt)
+        self.temp_film = DenseFiLM(config['film'], opt)
+        self.cross_film = DenseFiLM(config['film'], opt)
+        self.ffn_film = DenseFiLM(config['film'], opt)
 
     def _sa_block(self, x, style=None, fixed_attn=None):
         x = self.skel_norm(x)
@@ -263,13 +275,13 @@ class SkipTransformer(nn.Module):
         
         # transformer encoder
         self.input_blocks = nn.ModuleList()
-        self.middle_block = STTransformerLayer(config, opt)
+        self.middle_block = STTransformerLayer(config["layer"], opt)
         self.output_blocks = nn.ModuleList()
         self.skip_blocks = nn.ModuleList()
 
         for i in range((self.opt.n_layers - 1) // 2):
-            self.input_blocks.append(STTransformerLayer(config, opt))
-            self.output_blocks.append(STTransformerLayer(config, opt))
+            self.input_blocks.append(STTransformerLayer(config["layer"], opt))
+            self.output_blocks.append(STTransformerLayer(config["layer"], opt))
             self.skip_blocks.append(nn.Linear(opt.latent_dim * 2, opt.latent_dim))
 
 

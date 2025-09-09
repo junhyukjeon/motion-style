@@ -12,6 +12,13 @@ from salad.utils.get_opt import get_opt
 from utils.train.loss import LOSS_REGISTRY
 
 
+def lengths_to_mask(lengths: torch.Tensor) -> torch.Tensor:
+    max_frames = torch.max(lengths)
+    mask = torch.arange(max_frames, device=lengths.device).expand(
+        len(lengths), max_frames) < lengths.unsqueeze(1)
+    return mask
+
+
 def load_vae(vae_opt):
     print(f'Loading VAE Model {vae_opt.name}')
     model = VAE(vae_opt)
@@ -57,7 +64,7 @@ class Text2StylizedMotion(nn.Module):
             clip_sample=False,
         )
 
-    def optimize(self, batch):
+    def forward(self, batch):
         motion, caption, style_idx = batch
 
         # Random drop for text
@@ -75,8 +82,7 @@ class Text2StylizedMotion(nn.Module):
 
         # To device
         motion   = motion.to(self.opt.device, dtype=torch.float32)
-        # m_lens   = m_lens.to(self.opt.device, dtype=torch.long)
-        len_mask = lengths_to_mask(m_lens // 4)
+        len_mask = lengths_to_mask(motion.shape[1] // 4)
 
         # Latent
         with torch.no_grad():
@@ -100,10 +106,6 @@ class Text2StylizedMotion(nn.Module):
         # Predict the noise
         pred, attn_list = self.denoiser.forward(noisy_latent, timesetps, text, len_mask=len_mask)
         pred = pred * len_mask[..., None, None].float()
-
-        # Loss
-        loss_dict = {}
-        loss = 0
 
         return {
             "pred": pred,

@@ -85,11 +85,14 @@ if __name__ == "__main__":
     model_cfg = config['model']
     model = Text2StylizedMotion(model_cfg).to(device)
 
+    batch = next(iter(train_loader))
+    test = model(batch)
+
     import pdb; pdb.set_trace()
 
     optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'])
 
-    loss_cfg = config['loss'] 
+    loss_cfg = config['loss']
     loss_fns = {name: LOSS_REGISTRY[name] for name in loss_cfg}
 
     # --- Early Stopper ---

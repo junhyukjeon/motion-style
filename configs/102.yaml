@@ -41,7 +41,7 @@ model:
   denoiser:
     transformer:
       layer:
-        attention:
+        attention: {}
         film:
           lora:
             type: HyperLoRA
@@ -62,6 +62,8 @@ model:
       style_dim: 256
       hidden_dim: 256
       num_heads: 8
+  text_drop: 0.1
+  style_drop: 0.1
 
 
 # --- Early Stopper --- #

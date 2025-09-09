@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from salad.models.denoiser.transformer import MultiheadAttention
 from model.lora import LORA_REGISTRY
 
+
 # --- Skip Transformer --- #
 def featurewise_affine(x, scale_shift):
     scale, shift = scale_shift
@@ -19,15 +20,17 @@ class DenseFiLM(nn.Module):
             nn.Linear(opt.latent_dim, opt.latent_dim * 2),
         )
 
-        if config["lora"]:
-            lora_config = config["lora"]
-            self.lora = LORA_REGISTRY[lora_config['type']](lora_config)
+        self.use_lora = False
+        if "lora" in config:
+            lora_cfg = config["lora"]
+            self.lora = LORA_REGISTRY[lora_cfg['type']](lora_cfg)
+            self.use_lora = True
 
     def forward(self, cond, style=None):
         x  = self.linear[0](cond)
         y0 = self.linear[1](x)
 
-        if (self.lora is not None) and (style is not None):
+        if self.use_lora and style is not None:
             delta = self.lora(x.unsqueeze(1), style).squeeze(1)
             y = y0 + delta
         else:
@@ -49,9 +52,9 @@ class MultiheadAttention(nn.Module):
         self.head_dim = d_model // n_heads
         self.batch_first = batch_first
         self.dropout = nn.Dropout(dropout)
-        self.use_lora = False
 
-        if config["lora"]:
+        self.use_lora = False
+        if "lora" in config:
             lora_cfg = config["lora"]
             self.q_lora = LORA_REGISTRY[lora_cfg['type']](lora_cfg)
             self.k_lora = LORA_REGISTRY[lora_cfg['type']](lora_cfg)
@@ -283,7 +286,6 @@ class SkipTransformer(nn.Module):
             self.input_blocks.append(STTransformerLayer(config["layer"], opt))
             self.output_blocks.append(STTransformerLayer(config["layer"], opt))
             self.skip_blocks.append(nn.Linear(opt.latent_dim * 2, opt.latent_dim))
-
 
     def forward(self, x, timestep_emb, word_emb, sa_mask=None, ca_mask=None, need_attn=False,
                 fixed_sa=None, fixed_ta=None, fixed_ca=None, style=None):

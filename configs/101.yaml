@@ -50,7 +50,7 @@ model:
             in_dim: 256
             out_dim: 256
             hidden_dim: 512
-        film: 
+        film: {}
   style_encoder: 
     type: StyleTransformer
     dropout: 0.1
@@ -62,7 +62,8 @@ model:
       style_dim: 256
       hidden_dim: 256
       num_heads: 8
-
+  text_drop: 0.1
+  style_drop: 0.1
 
 # --- Early Stopper --- #
 early:

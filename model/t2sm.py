@@ -1,15 +1,17 @@
 # --- Imports ---
+import os
+import random
+import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from diffusers import DDIMScheduler
 from os.path import join as pjoin
 
-from data.dataset import TextStyleDataset
 from model.denoiser import Denoiser
 from model.style import STYLE_REGISTRY
 from salad.models.vae.model import VAE
 from salad.utils.get_opt import get_opt
-from utils.train.loss import LOSS_REGISTRY
 
 
 def lengths_to_mask(lengths: torch.Tensor) -> torch.Tensor:
@@ -65,30 +67,29 @@ class Text2StylizedMotion(nn.Module):
         )
 
     def forward(self, batch):
-        motion, caption, style_idx = batch
+        motion, text, _ = batch
 
         # Random drop for text
         text = [
             "" if np.random.rand(1) < self.config['text_drop'] else t for t in text
         ]
 
-        # Style embedding
-        with torch.no_grad():
-            style = self.style_encoder.encode(motion)
-        
-        # Random drop for style
-        if np.random.rand() < self.config['style_drop']:
-            style = torch.zeros_like(style)
-
         # To device
         motion   = motion.to(self.opt.device, dtype=torch.float32)
-        len_mask = lengths_to_mask(motion.shape[1] // 4)
+        len_mask = lengths_to_mask(torch.tensor([motion.shape[1] // 4], device=self.device))
 
         # Latent
         with torch.no_grad():
             latent, _ = self.vae.encode(motion)
             len_mask = F.pad(len_mask, (0, latent.shape[1] - len_mask.shape[1]), mode="constant", value=False)
             latent = latent * len_mask[..., None, None].float()
+
+        # Style embedding
+        style = self.style_encoder(latent)
+        
+        # Random drop for style
+        if np.random.rand() < self.config['style_drop']:
+            style = torch.zeros_like(style)
 
         # Sample diffusion timesteps
         timesteps = torch.randint(
@@ -101,10 +102,10 @@ class Text2StylizedMotion(nn.Module):
         # Add noise
         noise = torch.randn_like(latent)
         noise = noise * len_mask[..., None, None].float()
-        noisy_latent = self.noise_scheduler.add_noise(latent, noise, timesteps)
+        noisy_latent = self.scheduler.add_noise(latent, noise, timesteps)
 
         # Predict the noise
-        pred, attn_list = self.denoiser.forward(noisy_latent, timesetps, text, len_mask=len_mask)
+        pred, attn_list = self.denoiser.forward(noisy_latent, timesteps, text, len_mask=len_mask)
         pred = pred * len_mask[..., None, None].float()
 
         return {
@@ -112,8 +113,5 @@ class Text2StylizedMotion(nn.Module):
             "latent": latent,
             "noise": noise,
             "timesteps": timesteps,
-            "len_mask": len_mask,
-            "attn": attn_list,
-            "text": text,
             "style": style,
         }

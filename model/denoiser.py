@@ -120,7 +120,6 @@ class Denoiser(nn.Module):
             fixed_sa=fixed_sa,
             fixed_ta=fixed_ta,
             fixed_ca=fixed_ca,
-            fixed_cs=fixed_cs,
             style=style
         )
 

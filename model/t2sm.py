@@ -34,9 +34,25 @@ def load_vae(vae_opt):
 def load_denoiser(config, opt, vae_dim):
     print(f'Loading Denoiser Model {opt.name}')
     denoiser = Denoiser(config, opt, vae_dim)
-    ckpt = torch.load(pjoin(opt.checkpoints_dir, opt.dataset_name, opt.name, 'model', 'net_best_fid.tar'),
+    state = torch.load(pjoin(opt.checkpoints_dir, opt.dataset_name, opt.name, 'model', 'net_best_fid.tar'),
                             map_location='cpu')
-    denoiser.load_state_dict(ckpt["denoiser"], strict=False)
+    missing_keys, unexpected_keys = denoiser.load_state_dict(state["denoiser"], strict=False)
+    for p in denoiser.parameters():
+        p.requires_grad = False
+
+    model_keys  = set(denoiser.state_dict().keys())
+    ckpt_keys   = set(state["denoiser"].keys())
+    missing_set = model_keys - ckpt_keys
+
+    for n, p in denoiser.named_parameters():
+        if n.startswith("clip_model."):
+            p.requires_grad = False
+        elif n in missing_set:
+            p.requires_grad = True
+
+    n_train = sum(p.numel() for p in denoiser.parameters() if p.requires_grad)
+    n_total = sum(p.numel() for p in denoiser.parameters())
+    print(f"Trainable params in denoiser: {n_train}/{n_total}")
     return denoiser
 
 
@@ -65,7 +81,7 @@ class Text2StylizedMotion(nn.Module):
         )
 
     def forward(self, batch):
-        motion, text, _ = batch
+        motion, text, style_idx = batch
 
         # Random drop for text
         text = [
@@ -74,9 +90,7 @@ class Text2StylizedMotion(nn.Module):
 
         # To device
         motion   = motion.to(self.opt.device, dtype=torch.float32)
-        B, T = motion.shape[0], motion.shape[1] // 4
-        lengths = torch.full((B,), T, device=motion.device, dtype=torch.long)
-        len_mask = lengths_to_mask(lengths)
+        len_mask = lengths_to_mask(torch.tensor([motion.shape[1] // 4], device=self.device))
 
         # Latent
         with torch.no_grad():
@@ -105,10 +119,8 @@ class Text2StylizedMotion(nn.Module):
         noisy_latent = self.scheduler.add_noise(latent, noise, timesteps)
 
         # Predict the noise
-        pred, attn_list = self.denoiser.forward(noisy_latent, timesteps, text, len_mask=len_mask, style=style)
+        pred, attn_list = self.denoiser.forward(noisy_latent, timesteps, text, len_mask=len_mask)
         pred = pred * len_mask[..., None, None].float()
-
-        import pdb; pdb.set_trace()
 
         return {
             "pred": pred,
@@ -116,4 +128,5 @@ class Text2StylizedMotion(nn.Module):
             "noise": noise,
             "timesteps": timesteps,
             "style": style,
+            "style_idx": style_idx
         }

@@ -101,14 +101,16 @@ if __name__ == "__main__":
     # --- Training --- #
     best_val_loss = float('inf')
     for epoch in range(1, config['epochs'] + 1):
+        # Train
         model.train()
         losses_scaled_sum = defaultdict(float)
         losses_raw_sum    = defaultdict(float)
 
         pbar = tqdm(train_loader, desc=f"[Train] Epoch {epoch}")
         batch_idx = -1
-        for batch_idx, batch in enumerate(pbar):
-            out = model(batch)
+        for batch_idx, (motion, text, style_idx) in enumerate(pbar):
+            motion, style_idx = motion.to(device), style_idx.to(device)
+            out = model(motion, text, style_idx)
             losses = {}
             total_loss = 0.0
             for name, fn in loss_fns.items():
@@ -117,10 +119,10 @@ if __name__ == "__main__":
                 scaled = raw * spec['weight']
                 losses[name] = (scaled, raw)
                 total_loss = total_loss + scaled
-
             optimizer.zero_grad(set_to_none=True)
             total_loss.backward()
             optimizer.step()
+            pbar.set_postfix(loss=float(total_loss.item()))
             for name, (scaled, raw) in losses.items():
                 losses_scaled_sum[name] += scaled.item()
                 losses_raw_sum[name]    += raw.item()
@@ -136,59 +138,55 @@ if __name__ == "__main__":
                 writer.add_scalar(f"Train/Raw/{name}",    losses_raw_sum[name]    / max(num_batches,1), epoch)
                 writer.add_scalar(f"Train/Scaled/{name}", losses_scaled_sum[name] / max(num_batches,1), epoch)
 
+        # Validate
+        model.eval()
+        losses_scaled_sum = defaultdict(float)
+        losses_raw_sum    = defaultdict(float)
 
+        with torch.no_grad():
+            pbar = tqdm(valid_loader, desc=f"[Valid] Epoch {epoch if epoch is not None else ''}".strip())
+            batch_idx = -1
+            for batch_idx, (motion, text, style_idx) in enumerate(pbar):
+                motion, style_idx = motion.to(device), style_idx.to(device)
+                out = model(motion, text, style_idx)
+                losses = {}
+                total_loss = 0.0
+                for name, fn in loss_fns.items():
+                    spec   = loss_cfg[name]
+                    raw    = fn(spec, model, out)
+                    scaled = raw * spec['weight']
+                    losses[name] = (scaled, raw)
+                    total_loss = total_loss + scaled
+                pbar.set_postfix(loss=float(total_loss.item()))
+                for name, (scaled, raw) in losses.items():
+                    losses_scaled_sum[name] += scaled.item()
+                    losses_raw_sum[name]    += raw.item()
 
-        # # --- Train --- #
-        # train_scaled, train_raw = train(
-        #     model=model,
-        #     loader=train_loader,
-        #     device=device,
-        #     loss_cfg=loss_cfg,
-        #     loss_fns=loss_fns,
-        #     scaler=scaler,
-        #     optimizer=optimizer,
-        #     writer=writer,
-        #     epoch=epoch,
-        #     clip_grad=5.0,
-        # )
+            num_batches = max(batch_idx + 1, 1)
+            val_total_scaled = sum(losses_scaled_sum.values()) / num_batches
+            val_total_raw    = sum(losses_raw_sum.values())  / num_batches
 
-        # # --- Validate --- #
-        # valid_scaled, valid_task = validate(   # valid_task = raw-weighted total
-        #     model=model,
-        #     loader=valid_loader,
-        #     device=device,
-        #     loss_cfg=loss_cfg,
-        #     loss_fns=loss_fns,
-        #     scaler=scaler,
-        #     writer=writer,
-        #     epoch=epoch
-        # )
+            if writer is not None and epoch is not None:
+                writer.add_scalar("Valid/Raw/Total",    val_total_raw,    epoch)
+                writer.add_scalar("Valid/Scaled/Total", val_total_scaled, epoch)
+                for name in losses_scaled_sum.keys():
+                    writer.add_scalar(f"Valid/Raw/{name}",    losses_raw_sum[name]    / num_batches, epoch)
+                    writer.add_scalar(f"Valid/Scaled/{name}", losses_scaled_sum[name] / num_batches, epoch)
 
-        # print(
-        #     f"Epoch {epoch} | "
-        #     f"Train scaled: {train_scaled:.4f} | Train raw: {train_raw:.4f} | "
-        #     f"Valid scaled: {valid_scaled:.4f} | Valid raw: {valid_task:.4f}"
-        # )
-        # model.train()  # ensure we’re back in train mode
+            print(
+                f"Epoch {epoch} | "
+                f"Train scaled: {train_total_scaled:.4f} | Train raw: {train_total_raw:.4f} | "
+                f"Valid scaled: {val_total_scaled:.4f} | Valid raw: {val_total_raw:.4f} | "
+            )
 
-        # # --- t-SNE, checkpoints, best model --- #
-        # plot_tsne(
-        #     model, valid_loader, device, epoch, title="valid",
-        #     result_dir=config["result_dir"],
-        #     label_to_name_dict=valid_dataset.label_to_style,
-        #     writer=writer
-        # )
+            os.makedirs(config["checkpoint_dir"], exist_ok=True)
+            torch.save(model.state_dict(), os.path.join(config["checkpoint_dir"], "latest.ckpt"))
 
-        # os.makedirs(config["checkpoint_dir"], exist_ok=True)
-        # torch.save(model.state_dict(), os.path.join(config["checkpoint_dir"], "latest.ckpt"))
+            if early.is_improvement(val_total_raw):
+                print(f"✅ New best at epoch {epoch} (Val task: {val_total_raw:.4f})")
+                torch.save(model.state_dict(), os.path.join(config["checkpoint_dir"], "best.ckpt"))
 
-        # # Save best and early stop on the task metric
-        # if early.is_improvement(valid_task):
-        #     print(f"✅ New best at epoch {epoch} (Val task: {valid_task:.4f})")
-        #     torch.save(model.state_dict(), os.path.join(config["checkpoint_dir"], "best.ckpt"))
-
-        # if early.step(valid_task, epoch):
-        #     print(f"⏹️ Early stopping at epoch {epoch} "
-        #         f"(best task={early.best:.4f} at epoch {early.best_epoch})")
-        #     break
-
+            if early.step(val_total_raw, epoch):
+                print(f"⏹️ Early stopping at epoch {epoch} "
+                    f"(best task={early.best:.4f} at epoch {early.best_epoch})")
+                break

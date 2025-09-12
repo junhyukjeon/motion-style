@@ -80,9 +80,7 @@ class Text2StylizedMotion(nn.Module):
             clip_sample=False,
         )
 
-    def forward(self, batch):
-        motion, text, style_idx = batch
-
+    def forward(self, motion, text, style_idx):
         # Random drop for text
         text = [
             "" if np.random.rand(1) < self.config['text_drop'] else t for t in text
@@ -90,7 +88,9 @@ class Text2StylizedMotion(nn.Module):
 
         # To device
         motion   = motion.to(self.opt.device, dtype=torch.float32)
-        len_mask = lengths_to_mask(torch.tensor([motion.shape[1] // 4], device=self.device))
+        B, T     = motion.shape[0], motion.shape[1] // 4
+        lengths  = torch.full((B,), T, device=motion.device, dtype=torch.long)
+        len_mask = lengths_to_mask(lengths)
 
         # Latent
         with torch.no_grad():
@@ -102,8 +102,8 @@ class Text2StylizedMotion(nn.Module):
         style = self.style_encoder(latent)
         
         # Random drop for style
-        if np.random.rand() < self.config['style_drop']:
-            style = torch.zeros_like(style)
+        # if np.random.rand() < self.config['style_drop']:
+        #     style = torch.zeros_like(style)
 
         # Sample diffusion timesteps
         timesteps = torch.randint(

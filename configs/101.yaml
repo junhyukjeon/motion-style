@@ -46,7 +46,7 @@ model:
       hidden_dim: 256
       num_heads: 8
   text_drop: 0.1
-  style_drop: 0.1
+  style_drop: 0.0
 
 # --- Losses --- #
 loss:

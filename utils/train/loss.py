@@ -8,7 +8,7 @@ def loss_velocity(config, model, out):
     noise      = out["noise"]
     timesteps  = out["timesteps"]
     velocity   = model.scheduler.get_velocity(latent, noise, timesteps)
-    return F.mse_loss(pred, vel)
+    return F.mse_loss(pred, velocity)
 
 
 def loss_supcon(config, model, out):

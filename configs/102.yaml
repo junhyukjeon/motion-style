@@ -4,7 +4,6 @@ result_dir: ./results
 checkpoint_dir: ./checkpoints/sc
 random_seed: 42
 
-
 # --- Dataset --- #
 dataset:
   motion_dir  : ./dataset/100style/new_joint_vecs
@@ -14,27 +13,11 @@ dataset:
   style_json  : ./dataset/100style/100style_clean_clean.json
   window_size : 64
 
-
 # --- Sampler Settings --- #
 sampler:
   type: TrainSampler
   batch_size: 32
   samples_per_style: 8
-
-
-# --- Training Hyperparameters --- #
-epochs: 100
-lr: 0.001
-text_drop: 0.1
-style_drop: 0.1
-valid_size: 0.2
-
-
-# --- Losses --- #
-# loss:
-#   velocity:
-#     criterion:
-#   supcon:
 
 # --- Model --- #
 model:
@@ -63,11 +46,29 @@ model:
       hidden_dim: 256
       num_heads: 8
   text_drop: 0.1
-  style_drop: 0.1
+  style_drop: 0.0
 
+# --- Losses --- #
+loss:
+  velocity:
+    weight: 1.0
+  supcon:
+    weight: 1.0
+    temperature: 0.07
 
 # --- Early Stopper --- #
 early:
   patience: 10
   min_delta: 0.0
   mode: min
+
+# --- Loss Scaler --- #
+scaler:
+  alpha: 0.01
+  norm_eps: 1e-8
+  warmup_batches: 1000
+
+# --- Training --- #
+epochs: 100
+lr: 0.001
+valid_size: 0.2

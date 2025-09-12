@@ -220,6 +220,7 @@ class STTransformerLayer(nn.Module):
                 skel_attn=None, temp_attn=None, cross_attn=None, style=None):
 
         B, T, J, D = x.size()
+        S = style.size(-1) if style is not None else None
 
         # Diffusion timestep embedding
         skel_cond = self.skel_film(cond)
@@ -230,12 +231,10 @@ class STTransformerLayer(nn.Module):
         # Temporal attention
         x_t = x.transpose(1, 2).reshape(B * J, T, D)
         # x_mask_t = None if x_mask is None else x_mask.repeat_interleave(J, dim=0)
+        style_t = None
         if style is not None:
-            S = style.size(-1)
-            style_t = style.unsqueeze(1).expand(B, J, S).reshape(B * J, S)         # [B*J, S]
-        else:
-            style_t = None
-
+            style_t = style.unsqueeze(1).expand(B, J, S).reshape(B * J, S)
+        # temp_fixed = None if temp_attn is None else temp_attn.repeat_interleave(J, dim=0)
         ta_out, ta_weight = self._ta_block(x_t, style=style_t, mask=x_mask, fixed_attn=temp_attn)
         ta_out = ta_out.reshape(B, J, T, D).transpose(1, 2)
         ta_out = featurewise_affine(ta_out, temp_cond)
@@ -243,11 +242,10 @@ class STTransformerLayer(nn.Module):
 
         # Skeletal attention
         x_s = x.reshape(B * T, J, D)
+        style_s = None
         if style is not None:
-            style_s = style.unsqueeze(1).expand(B, T, S).reshape(B * T, S)         # [B*T, S]
-        else:
-            style_s = None
-
+            style_s = style.unsqueeze(1).expand(B, T, S).reshape(B * T, S)
+        # skel_fixed = None if skel_attn is None else skel_attn.repeat_interleave(T, dim=0)
         sa_out, sa_weight = self._sa_block(x_s, style=style_s, fixed_attn=skel_attn)
         sa_out = sa_out.reshape(B, T, J, D)
         sa_out = featurewise_affine(sa_out, skel_cond)

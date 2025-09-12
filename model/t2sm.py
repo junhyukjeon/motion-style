@@ -31,14 +31,12 @@ def load_vae(vae_opt):
     return model
 
 
-def load_denoiser(opt, vae_dim):
+def load_denoiser(config, opt, vae_dim):
     print(f'Loading Denoiser Model {opt.name}')
-    denoiser = Denoiser(opt, vae_dim)
+    denoiser = Denoiser(config, opt, vae_dim)
     ckpt = torch.load(pjoin(opt.checkpoints_dir, opt.dataset_name, opt.name, 'model', 'net_best_fid.tar'),
                             map_location='cpu')
-    missing_keys, unexpected_keys = denoiser.load_state_dict(ckpt["denoiser"], strict=False)
-    assert len(unexpected_keys) == 0
-    assert all([k.startswith('clip_model.') for k in missing_keys])
+    denoiser.load_state_dict(ckpt["denoiser"], strict=False)
     return denoiser
 
 
@@ -53,7 +51,7 @@ class Text2StylizedMotion(nn.Module):
         # Components
         self.vae           = load_vae(self.vae_opt).to(self.device)
         self.style_encoder = STYLE_REGISTRY[config['style_encoder']['type']](config['style_encoder']).to(self.device)
-        self.denoiser      = Denoiser(config['denoiser'], self.opt, self.vae_opt.latent_dim).to(self.device)
+        self.denoiser      = load_denoiser(config['denoiser'], self.opt, self.vae_opt.latent_dim).to(self.device)
         self.tokenizer     = self.denoiser.clip_model.tokenizer
 
         # Scheduler
@@ -76,7 +74,9 @@ class Text2StylizedMotion(nn.Module):
 
         # To device
         motion   = motion.to(self.opt.device, dtype=torch.float32)
-        len_mask = lengths_to_mask(torch.tensor([motion.shape[1] // 4], device=self.device))
+        B, T = motion.shape[0], motion.shape[1] // 4
+        lengths = torch.full((B,), T, device=motion.device, dtype=torch.long)
+        len_mask = lengths_to_mask(lengths)
 
         # Latent
         with torch.no_grad():
@@ -105,8 +105,10 @@ class Text2StylizedMotion(nn.Module):
         noisy_latent = self.scheduler.add_noise(latent, noise, timesteps)
 
         # Predict the noise
-        pred, attn_list = self.denoiser.forward(noisy_latent, timesteps, text, len_mask=len_mask)
+        pred, attn_list = self.denoiser.forward(noisy_latent, timesteps, text, len_mask=len_mask, style=style)
         pred = pred * len_mask[..., None, None].float()
+
+        import pdb; pdb.set_trace()
 
         return {
             "pred": pred,

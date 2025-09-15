@@ -89,6 +89,9 @@ if __name__ == "__main__":
         lr=config['lr']
     )
 
+    import pdb; pdb.set_trace()
+
+
     # --- Losses & Scaler --- #
     loss_cfg = config['loss']
     loss_fns = {name: LOSS_REGISTRY[name] for name in loss_cfg}

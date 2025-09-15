@@ -89,8 +89,6 @@ if __name__ == "__main__":
     output_dir = os.path.join(config["result_dir"], "style")
     reset_dir(output_dir)
 
-    # import pdb; pdb.set_trace()
-
     # === [1] Load reference style motion
     # style_idx = 1540217
     style_idx = 815700

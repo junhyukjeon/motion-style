@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from diffusers import DDIMScheduler
 from os.path import join as pjoin
+from tqdm import tqdm
 
 from model.denoiser import Denoiser
 from model.style import STYLE_REGISTRY
@@ -87,7 +88,7 @@ class Text2StylizedMotion(nn.Module):
         ]
 
         # To device
-        motion   = motion.to(self.opt.device, dtype=torch.float32)
+        # motion   = motion.to(self.opt.device, dtype=torch.float32)
         B, T     = motion.shape[0], motion.shape[1] // 4
         lengths  = torch.full((B,), T, device=motion.device, dtype=torch.long)
         len_mask = lengths_to_mask(lengths)
@@ -129,22 +130,47 @@ class Text2StylizedMotion(nn.Module):
 
     @torch.no_grad()
     def generate(self, motion, text):
+        text = [t for t in text]
         B, T = motion.shape[0], motion.shape[1] // 4
-
-        # Input
-        if init_noise is None:
-            z = torch.rand
-
-        # To device
-        motion   = motion.to(self.opt.device, dtype=torch.float32)
-        B, T     = motion.shape[0], motion.shape[1] // 4
         lengths  = torch.full((B,), T, device=motion.device, dtype=torch.long)
         len_mask = lengths_to_mask(lengths)
 
-        # Latent
+        # Input
+        z = torch.randn(B, T, 7, self.vae_opt.latent_dim).to(self.device, dtype=torch.float32)
+        z = z * self.scheduler.init_noise_sigma
+
+        # Set diffusion timesteps
+        self.scheduler.set_timesteps(50)
+        timesteps = self.scheduler.timesteps.to(self.device)
+
+        # Motion latent
         latent, _ = self.vae.encode(motion)
         len_mask = F.pad(len_mask, (0, latent.shape[1] - len_mask.shape[1]), mode="constant", value=False)
         latent = latent * len_mask[..., None, None].float()
 
-        # Style embedding
+        # Style latent
         style = self.style_encoder(latent)
+
+        text = ["a person is walking forward"] * B
+
+        # sa_weights, ta_weights, ca_weights = [], [], []
+        for timestep in tqdm(timesteps, desc="Reverse diffusion", leave=False):
+            pred_uncond, _ = self.denoiser.forward(z, timestep, [""]*B, len_mask=len_mask, need_attn=False)
+            pred_cond, (sa, ta, ca) = self.denoiser.forward(z, timestep, text, len_mask=len_mask, need_attn=True, style=style)
+            pred = pred_uncond + self.config['scale'] * (pred_cond - pred_uncond)
+            z = self.scheduler.step(pred, timestep, z).prev_sample
+            # sa_weights.append(sa)
+            # ta_weights.append(ta)
+            # ca_weights.append(ca)
+
+        stylized_motion = self.vae.decode(z)
+        return stylized_motion, text
+            
+
+        # Latent
+        # latent, _ = self.vae.encode(motion)
+        # len_mask = F.pad(len_mask, (0, latent.shape[1] - len_mask.shape[1]), mode="constant", value=False)
+        # latent = latent * len_mask[..., None, None].float()
+
+        # Style embedding
+        # style = self.style_encoder(latent)

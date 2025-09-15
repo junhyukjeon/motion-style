@@ -54,50 +54,42 @@ class TrainSampler(BatchSampler):
 
 
 class StyleSampler(BatchSampler):
-    def __init__(self, config, dataset):
+    def __init__(self, config, dataset, target_style):
         self.config = config
         self.dataset = dataset
-        self.batch_size = self.config['batch_size']
-        self.samples_per_class = self.config['samples_per_class']
+        self.batch_size = config['batch_size']
+        self.target_style = target_style
 
-        self.label_to_motion_indices = defaultdict(list)
-        for motion_idx, label in enumerate(dataset.labels):
-            self.label_to_motion_indices[label].append(motion_idx)
+        self.styles_to_motions = defaultdict(list)
+        for motion_idx, item in enumerate(dataset.items):
+            style_idx = item["style_idx"]
+            self.styles_to_motions[style_idx].append(motion_idx)
 
-        self.label_to_frame_indices = defaultdict(list)
+        self.styles_to_frames = defaultdict(list)
         cumsum = dataset.cumsum
-        for label, motion_indices in self.label_to_motion_indices.items():
-            for m_idx in motion_indices:
-                start = cumsum[m_idx]
-                end   = cumsum[m_idx + 1]
-                self.label_to_frame_indices[label].extend(range(start, end))
+        for style_idx, motion_idcs in self.styles_to_motions.items():
+            for motion_idx in motion_idcs:
+                start = cumsum[motion_idx]
+                end   = cumsum[motion_idx + 1]
+                if end > start:
+                    self.styles_to_frames[style_idx].append((start, end))
 
-        self.labels = [label for label in self.label_to_frame_indices if len(self.label_to_frame_indices[label]) >= self.samples_per_class]
-        self.batches = []
+        if target_style not in self.styles_to_frames:
+            raise ValueError(f"No windows found for style_idx={target_style}")
+        self.styles = [target_style]
         self.generate_batches()
 
-    def generate_batches(self, fixed_label=51): # 51 is "Neutral"
+    def generate_batches(self):
         self.batches = []
         num_batches = len(self.dataset) // self.batch_size
 
         for _ in range(num_batches):
-            # Step 1: Choose one fixed label if provided
-            if fixed_label is not None:
-                selected_labels = [fixed_label]
-                candidate_labels = [l for l in self.labels if l != fixed_label]
-            else:
-                selected_labels = []
-                candidate_labels = self.labels[:]
-
-            # Step 2: Randomly pick the remaining labels
-            num_labels_per_batch = self.batch_size // self.samples_per_class
-            selected_labels += random.sample(candidate_labels, num_labels_per_batch - len(selected_labels))
-
-            # Step 3: Sample frames for each label
             batch = []
-            for label in selected_labels:
-                batch.extend(random.sample(self.label_to_frame_indices[label], self.samples_per_class))
-
+            ranges = self.styles_to_frames[self.target_style]
+            for _ in range(self.batch_size):
+                r_start, r_end = random.choice(ranges)
+                frame_idx = random.randrange(r_start, r_end)
+                batch.append(frame_idx)
             self.batches.append(batch)
 
     def __iter__(self):
@@ -107,6 +99,62 @@ class StyleSampler(BatchSampler):
 
     def __len__(self):
         return len(self.batches)
+
+
+# class StyleSampler(BatchSampler):
+#     def __init__(self, config, dataset):
+#         self.config = config
+#         self.dataset = dataset
+#         self.batch_size = self.config['batch_size']
+#         self.samples_per_class = self.config['samples_per_class']
+
+#         self.label_to_motion_indices = defaultdict(list)
+#         for motion_idx, label in enumerate(dataset.labels):
+#             self.label_to_motion_indices[label].append(motion_idx)
+
+#         self.label_to_frame_indices = defaultdict(list)
+#         cumsum = dataset.cumsum
+#         for label, motion_indices in self.label_to_motion_indices.items():
+#             for m_idx in motion_indices:
+#                 start = cumsum[m_idx]
+#                 end   = cumsum[m_idx + 1]
+#                 self.label_to_frame_indices[label].extend(range(start, end))
+
+#         self.labels = [label for label in self.label_to_frame_indices if len(self.label_to_frame_indices[label]) >= self.samples_per_class]
+#         self.batches = []
+#         self.generate_batches()
+
+#     def generate_batches(self, fixed_label=51): # 51 is "Neutral"
+#         self.batches = []
+#         num_batches = len(self.dataset) // self.batch_size
+
+#         for _ in range(num_batches):
+#             # Step 1: Choose one fixed label if provided
+#             if fixed_label is not None:
+#                 selected_labels = [fixed_label]
+#                 candidate_labels = [l for l in self.labels if l != fixed_label]
+#             else:
+#                 selected_labels = []
+#                 candidate_labels = self.labels[:]
+
+#             # Step 2: Randomly pick the remaining labels
+#             num_labels_per_batch = self.batch_size // self.samples_per_class
+#             selected_labels += random.sample(candidate_labels, num_labels_per_batch - len(selected_labels))
+
+#             # Step 3: Sample frames for each label
+#             batch = []
+#             for label in selected_labels:
+#                 batch.extend(random.sample(self.label_to_frame_indices[label], self.samples_per_class))
+
+#             self.batches.append(batch)
+
+#     def __iter__(self):
+#         self.generate_batches()
+#         random.shuffle(self.batches)
+#         return iter(self.batches)
+
+#     def __len__(self):
+#         return len(self.batches)
 
 
 class TwoStyleSampler(BatchSampler):

@@ -1,25 +1,43 @@
 import argparse
 import json
-import numpy as np
 import os
 import random
 import shutil
+from collections import defaultdict
+import numpy as np
 import torch
+import torch.nn.functional as F
 import yaml
+from sklearn.model_selection import train_test_split
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-from data.dataset import StyleDataset
+from data.dataset import TextStyleDataset
+from data.sampler import StyleSampler
 from model.networks import NETWORK_REGISTRY
-from utils.motion import *
+from model.t2sm import Text2StylizedMotion
+from utils.motion import recover_from_ric
 from utils.skel import Skeleton
-# from utils.process import parse_humanml3d
-# from utils.write import write_bvh
+from utils.train.early_stop import EarlyStopper
+from utils.train.loss import LOSS_REGISTRY
+
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 def reset_dir(path):
     if os.path.exists(path):
         shutil.rmtree(path)
     os.makedirs(path)
-
 
 def get_unique_path(base_path):
     if not os.path.exists(base_path):
@@ -33,14 +51,11 @@ def get_unique_path(base_path):
             return new_path
         i += 1
 
-
-def set_seed(seed=42):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
+def slug(s: str, maxlen: int = 60) -> str:
+    # keep letters, digits, some punctuation; replace others with '_'
+    s = ''.join(c if (c.isalnum() or c in " _-.,()[]{}") else '_' for c in s.strip())
+    s = "_".join(s.split())  # spaces -> underscores
+    return (s[:maxlen]).rstrip("_")
 
 def load_config():
     parser = argparse.ArgumentParser()
@@ -57,266 +72,135 @@ def load_config():
     config["checkpoint_dir"] = os.path.join(config["checkpoint_dir"], config["run_name"])
     return config
 
-
 def load_model(config, device):
     model_cfg = config['model']
-    model = NETWORK_REGISTRY[model_cfg['type']](model_cfg).to(device)
+    model = Text2StylizedMotion(model_cfg).to(device)
     model.load_state_dict(torch.load(os.path.join(config["checkpoint_dir"], "best.ckpt"), map_location=device))
     model.eval()
     return model
 
-
-import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-
-
-import numpy as np
-import matplotlib
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-
-def plot_triple_3d_motion(
+def plot_single_3d_motion(
     save_path,
     kinematic_tree,
-    joints_gt,       # [T, 22, 3]
-    joints_recon,    # [T, 22, 3]
-    joints_swap,     # [T, 22, 3]
-    title_gt="GT",
-    title_recon="Recon",
-    title_swap="Swap",
-    figsize=(18, 6),
+    joints,          # (T, 22, 3)
+    title="Motion",
+    figsize=(6, 6),
     fps=120,
-    radius=4.0
+    radius=4.0,
 ):
-    matplotlib.use('Agg')
+    # Preprocess: lift to ground, center by root (x,z), keep traj for past path
+    d = joints.copy().reshape(len(joints), -1, 3)
+    mn, mx = d.min((0, 1)), d.max((0, 1))
+    d[:, :, 1] -= mn[1]
+    traj = d[:, 0, (0, 2)]
+    d[..., 0] -= d[:, 0:1, 0]
+    d[..., 2] -= d[:, 0:1, 2]
+    T = d.shape[0]
 
-    def prep_clip(joints):
-        data = joints.copy().reshape(len(joints), -1, 3)
-        mins = data.min(axis=0).min(axis=0)
-        maxs = data.max(axis=0).max(axis=0)
-        # lift to ground
-        data[:, :, 1] -= mins[1]
-        # root trajectory (x,z)
-        traj = data[:, 0, [0, 2]]
-        # center each frame on root XZ
-        data[..., 0] -= data[:, 0:1, 0]
-        data[..., 2] -= data[:, 0:1, 2]
-        return {"data": data, "mins": mins, "maxs": maxs, "traj": traj, "T": data.shape[0]}
-
-    G = prep_clip(joints_gt)
-    R = prep_clip(joints_recon)
-    S = prep_clip(joints_swap)
-    T = G["T"]
-    assert R["T"] == T and S["T"] == T, "All three sequences must have equal length"
-
-    # same palette & widths as your original
     colors = ['red','blue','black','red','blue',
               'darkblue','darkblue','darkblue','darkblue','darkblue',
               'darkred','darkred','darkred','darkred','darkred']
 
     fig = plt.figure(figsize=figsize)
-    axG = fig.add_subplot(1, 3, 1, projection='3d')
-    axR = fig.add_subplot(1, 3, 2, projection='3d')
-    axS = fig.add_subplot(1, 3, 3, projection='3d')
-    axes  = [axG, axR, axS]
-    clips = [G,   R,   S]
-    titles = [title_gt, title_recon, title_swap]
+    ax = fig.add_subplot(1, 1, 1, projection="3d")
+    ax.set(xlim=[-radius/2, radius/2], ylim=[0, radius], zlim=[0, radius], title=title)
+    ax.grid(False); ax.set_axis_off(); ax.view_init(120, -90)
 
-    for ax, title in zip(axes, titles):
-        ax.set_xlim3d([-radius / 2, radius / 2])
-        ax.set_ylim3d([0, radius])
-        ax.set_zlim3d([0, radius])
-        ax.set_title(title, fontsize=12)
-        ax.grid(False)
-        ax.set_axis_off()  # same effect as plt.axis('off') but scoped to this ax
-        ax.view_init(elev=120, azim=-90)
-        try: ax.dist = 7.5
-        except Exception: pass
+    # Ground plane
+    plane = Poly3DCollection([[[-radius/2, 0, 0], [-radius/2, 0, radius],
+                               [ radius/2, 0, radius], [ radius/2, 0, 0]]],
+                             facecolor=(0.5, 0.5, 0.5, 0.5))
+    ax.add_collection3d(plane)
 
-    fig.suptitle(f"{title_gt} | {title_recon} | {title_swap}", fontsize=16)
+    # Past trajectory line
+    ltraj, = ax.plot([], [], [], linewidth=1.0)
 
-    # ----- initialize artists once -----
-    planes = []
-    traj_lines = []
-    bone_lines = []   # list per-axes, each contains per-chain line
-    for ax in axes:
-        # simple initial plane (will update verts each frame)
-        verts0 = [[-radius/2, 0, 0],
-                  [-radius/2, 0, radius],
-                  [ radius/2, 0, radius],
-                  [ radius/2, 0, 0]]
-        plane = Poly3DCollection([verts0])
-        plane.set_facecolor((0.5, 0.5, 0.5, 0.5))
-        ax.add_collection3d(plane)
-        planes.append(plane)
+    # Skeleton lines per chain
+    lines = []
+    for i, chain in enumerate(kinematic_tree):
+        lw = 4.0 if i < 5 else 2.0
+        line, = ax.plot([], [], [], linewidth=lw, color=colors[i % len(colors)])
+        lines.append(line)
 
-        # past trajectory line
-        line_traj, = ax.plot([], [], [], linewidth=1.0, color='blue')
-        traj_lines.append(line_traj)
+    def update(t):
+        # Update plane around current root position using global bounds
+        px0, px1 = mn[0] - traj[t, 0], mx[0] - traj[t, 0]
+        pz0, pz1 = mn[2] - traj[t, 1], mx[2] - traj[t, 1]
+        plane.set_verts([[[px0, 0, pz0], [px0, 0, pz1], [px1, 0, pz1], [px1, 0, pz0]]])
 
-        # skeleton chain lines
-        lines = []
-        for ci, chain in enumerate(kinematic_tree):
-            lw = 4.0 if ci < 5 else 2.0
-            line, = ax.plot([], [], [], linewidth=lw, color=colors[ci % len(colors)])
-            lines.append(line)
-        bone_lines.append(lines)
+        # Update past trajectory (centered)
+        if t > 0:
+            x = traj[:t, 0] - traj[t, 0]
+            z = traj[:t, 1] - traj[t, 1]
+            ltraj.set_data_3d(x, np.zeros_like(x), z)
+        else:
+            ltraj.set_data_3d([], [], [])
 
-    # ----- per-frame update -----
-    def update(idx):
-        for ax, plane, ltraj, lines, clip in zip(axes, planes, traj_lines, bone_lines, clips):
-            data, traj, mins, maxs = clip["data"], clip["traj"], clip["mins"], clip["maxs"]
+        # Update bones for this frame
+        for line, chain in zip(lines, kinematic_tree):
+            line.set_data_3d(d[t, chain, 0], d[t, chain, 1], d[t, chain, 2])
 
-            # update ground plane verts to follow global XZ bounds relative to current root
-            px0, px1 = mins[0] - traj[idx, 0], maxs[0] - traj[idx, 0]
-            pz0, pz1 = mins[2] - traj[idx, 1], maxs[2] - traj[idx, 1]
-            plane.set_verts([[[px0, 0.0, pz0],
-                               [px0, 0.0, pz1],
-                               [px1, 0.0, pz1],
-                               [px1, 0.0, pz0]]])
+        return (ltraj, *lines, plane)
 
-            # update past trajectory (XZ, centered)
-            if idx > 1:
-                x = traj[:idx, 0] - traj[idx, 0]
-                y = np.zeros_like(x)
-                z = traj[:idx, 1] - traj[idx, 1]
-                ltraj.set_data_3d(x, y, z)
-            else:
-                ltraj.set_data_3d([], [], [])
-
-            # update bones
-            for line, chain in zip(lines, kinematic_tree):
-                xs = data[idx, chain, 0]
-                ys = data[idx, chain, 1]
-                zs = data[idx, chain, 2]
-                line.set_data_3d(xs, ys, zs)
-
-        # return a flat tuple of artists for FuncAnimation (no blit)
-        return tuple(traj_lines) + tuple(l for lines in bone_lines for l in lines) + tuple(planes)
-
-    ani = FuncAnimation(fig, update, frames=T, interval=1000 / fps, repeat=False)
-    ani.save(save_path, fps=fps)
+    FuncAnimation(fig, update, frames=T, interval=1000 / fps, repeat=False).save(save_path, fps=fps)
     plt.close(fig)
-
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = load_config()
     set_seed(config["random_seed"])
 
-    mean = np.load(config["mean_path"])
-    std = np.load(config["std_path"])
+    # --- Style Split --- #
+    with open(config["dataset"]["style_json"]) as f:
+        styles_to_ids = json.load(f)
+    styles_sorted = sorted(styles_to_ids.keys())
+    # train_styles, valid_styles = train_test_split(styles_sorted, test_size=config['valid_size'], random_state=config["random_seed"])
 
-    with open(config["style_json"]) as f:
-        label_to_ids = yaml.safe_load(f)
+    # --- Dataset & Loader --- #
+    dataset_cfg = config['dataset']
+    dataset = TextStyleDataset(dataset_cfg, styles_sorted)
 
-    style_to_label = {style: i for i, style in enumerate(sorted(label_to_ids))}
-
-    # --- Content Mapping ---
-    with open(config["content_json"]) as f:
-        content_to_ids = json.load(f)
-    
-    ids_to_content = {}
-    for content_type, motion_ids in content_to_ids.items():
-        for m_id in motion_ids:
-            ids_to_content[m_id] = content_type
-
-    dataset = StyleDataset(config["motion_dir"], mean, std, config["window_size"], label_to_ids, style_to_label, ids_to_content)
+    # --- Model --- #
+    model_cfg = config['model']
     model = load_model(config, device)
 
-    output_dir = os.path.join(config["result_dir"], "style")
+    output_dir = os.path.join(config["result_dir"], "stylized")
     reset_dir(output_dir)
 
-    # === [1] Load reference style motion
-    style_idx = 0
-    style_motion, _, _, style_motion_id = dataset[style_idx]
-    style_motion = style_motion.unsqueeze(0).to(device)  # [1, T, J, D]
-
-    # Find label name for style_motion_id
-    for label, ids in label_to_ids.items():
-        if style_motion_id in ids:
-            style_label = label
-            break
-    else:
-        raise ValueError(f"Could not find label for motion ID {style_motion_id}")
-
-    with torch.no_grad():
-        out = model.encode(style_motion)
-        z_style_swap = out["z_style"].expand(32, -1)
-        # z_style_swap = z_style_swap * 0
-
-    print(f"🎨 Using style from motion ID: {style_motion_id} (label: {style_label})")
-
-    # === [2] Sample 32 motions to swap content
-    sample_indices = random.sample(range(len(dataset)), 32)
-    batch_size = 32
-    batched_indices = [sample_indices[i:i+batch_size] for i in range(0, len(sample_indices), batch_size)]
-
+    # -- Mean & Standard Deviation --- #
+    mean = np.load(dataset_cfg["mean_path"])
     mean = torch.tensor(mean, dtype=torch.float32, device=device)
+    std = np.load(dataset_cfg["std_path"])
     std = torch.tensor(std, dtype=torch.float32, device=device)
 
-    for batch_ids in batched_indices:
-        motions, motion_ids = [], []
-        for idx in batch_ids:
-            motion, _, _, motion_id = dataset[idx]
-            motions.append(motion)
-            motion_ids.append(motion_id)
+    target_style_idx = 0
+    target_style     = dataset.style_idx_to_style[target_style_idx]
+    sampler_cfg = config['sampler']
+    sampler = StyleSampler(sampler_cfg, dataset, target_style=target_style_idx)
+    loader = DataLoader(dataset, batch_sampler=sampler, num_workers=0)
 
-        motions = torch.stack(motions).to(device)  # [B, T, J, D]
+    batch = next(iter(loader))
+    motions, captions, style_idcs = batch
+    motions = motions.to(device)
 
-        with torch.no_grad():
-            out = model.encode(motions)
-            z_style   = out["z_style"]
-            z_content = out["z_content"]
-            z_latent  = out["z_latent"]
+    stylized, captions = model.generate(motions, captions)
+    stylized = stylized * std + mean
+    joints   = recover_from_ric(stylized, 22).detach().cpu().numpy()
+    kinematic_tree = [[0, 2, 5, 8, 11], [0, 1, 4, 7, 10],
+                        [0, 3, 6, 9, 12, 15], [9, 14, 17, 19, 21],
+                        [9, 13, 16, 18, 20]]
 
-            z_recon = model.decode(z_style, z_content)
-            z_swap  = model.decode(z_style_swap, z_content)
-            motions_gt = model.encoder.vae.decode(z_latent) 
-            motions_swap  = model.encoder.vae.decode(z_swap)   # [B, T, J, D]
-            motions_recon = model.encoder.vae.decode(z_recon)
+    for i in tqdm(range(stylized.size(0)), desc="Rendering videos", leave=False):
+        cap = captions[i] if isinstance(captions, (list, tuple)) else str(captions[i])
+        cap = slug(cap)
+        save_path = os.path.join(output_dir, f"{cap}_{i}.mp4")
 
-        motions_gt = motions * std + mean
-        motions_recon = motions_recon * std + mean
-        motions_swap  = motions_swap  * std + mean
-
-        joints_gt    = recover_from_ric(motions_gt, 22)
-        joints_swap  = recover_from_ric(motions_swap, 22)
-        joints_recon = recover_from_ric(motions_recon, 22)
-
-        joints_gt       = joints_gt.detach().cpu().numpy()
-        joints_recon_np = joints_recon.detach().cpu().numpy()
-        joints_swap_np  = joints_swap.detach().cpu().numpy()
-
-        kinematic_tree = [[0, 2, 5, 8, 11], [0, 1, 4, 7, 10],
-                          [0, 3, 6, 9, 12, 15], [9, 14, 17, 19, 21],
-                          [9, 13, 16, 18, 20]]
-
-        # >>> progress bar moved here <<<
-        for i, motion_id in enumerate(tqdm(motion_ids, desc="Rendering videos", leave=False)):
-            save_path = os.path.join(output_dir, f"{motion_id}_{style_label}_pair.mp4")
-
-            plot_triple_3d_motion(
-                save_path=os.path.join(output_dir, f"{motion_id}_{style_label}_triple.mp4"),
-                kinematic_tree=kinematic_tree,
-                joints_gt=joints_gt[i],
-                joints_recon=joints_recon_np[i],
-                joints_swap=joints_swap_np[i],
-                title_gt="GT",
-                title_recon="Recon",
-                title_swap=f"Swap → {style_label}",
-                figsize=(18,6),
-                fps=20,
-                radius=4.0
-            )
+        plot_single_3d_motion(
+            save_path=save_path,
+            kinematic_tree=kinematic_tree,
+            joints=joints[i],
+            title=f"{target_style} — {cap}",
+            figsize=(6, 6),
+            fps=20,
+            radius=4.0,
+        )

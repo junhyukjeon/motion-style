@@ -1,32 +1,25 @@
 # --- Imports ---
 import argparse
-import colorcet as cc
-import contextlib
 import json
-import matplotlib.pyplot as plt
 import numpy as np
 import os
 import random
-import shutil
-import time
 import torch
 import torch.nn.functional as F
 import yaml
 from collections import defaultdict
-from sklearn.manifold import TSNE
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
-from matplotlib.colors import to_rgb
 
 from data.dataset import TextStyleDataset
 from data.sampler import SAMPLER_REGISTRY
 from model.t2sm import Text2StylizedMotion
 from utils.train.early_stop import EarlyStopper
 from utils.train.loss import LOSS_REGISTRY
-from utils.train.loss_scaler import LossScaler
-from utils.plot import plot_tsne
+# from utils.train.loss_scaler import LossScaler
+# from utils.plot import plot_tsne
 
 
 def set_seed(seed=42):
@@ -88,9 +81,6 @@ if __name__ == "__main__":
         (p for p in model.parameters() if p.requires_grad),
         lr=config['lr']
     )
-
-    import pdb; pdb.set_trace()
-
 
     # --- Losses & Scaler --- #
     loss_cfg = config['loss']

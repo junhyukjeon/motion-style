@@ -100,10 +100,6 @@ class Text2StylizedMotion(nn.Module):
 
         # Style embedding
         style = self.style_encoder(latent)
-        
-        # Random drop for style
-        # if np.random.rand() < self.config['style_drop']:
-        #     style = torch.zeros_like(style)
 
         # Sample diffusion timesteps
         timesteps = torch.randint(
@@ -130,3 +126,25 @@ class Text2StylizedMotion(nn.Module):
             "style": style,
             "style_idx": style_idx
         }
+
+    @torch.no_grad()
+    def generate(self, motion, text):
+        B, T = motion.shape[0], motion.shape[1] // 4
+
+        # Input
+        if init_noise is None:
+            z = torch.rand
+
+        # To device
+        motion   = motion.to(self.opt.device, dtype=torch.float32)
+        B, T     = motion.shape[0], motion.shape[1] // 4
+        lengths  = torch.full((B,), T, device=motion.device, dtype=torch.long)
+        len_mask = lengths_to_mask(lengths)
+
+        # Latent
+        latent, _ = self.vae.encode(motion)
+        len_mask = F.pad(len_mask, (0, latent.shape[1] - len_mask.shape[1]), mode="constant", value=False)
+        latent = latent * len_mask[..., None, None].float()
+
+        # Style embedding
+        style = self.style_encoder(latent)

@@ -304,7 +304,7 @@ if __name__ == "__main__":
         )
 
         # --- Validate ---
-        valid_scaled, valid_task = validate(   # valid_task = raw-weighted total
+        valid_scaled, valid_task = validate(
             model=model,
             loader=valid_loader,
             device=device,
@@ -320,7 +320,7 @@ if __name__ == "__main__":
             f"Train scaled: {train_scaled:.4f} | Train raw: {train_raw:.4f} | "
             f"Valid scaled: {valid_scaled:.4f} | Valid raw: {valid_task:.4f}"
         )
-        model.train()  # ensure we’re back in train mode
+        model.train()
 
         # --- t-SNE, checkpoints, best model ---
         plot_tsne(

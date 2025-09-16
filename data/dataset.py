@@ -7,12 +7,11 @@ from torch.utils.data import Dataset
 
 
 class TextStyleDataset(Dataset):
-    def __init__(self, config, styles, split=None):
+    def __init__(self, config, styles):
         self.motion_dir  = config["motion_dir"]
         self.mean        = np.load(config["mean_path"])
         self.std         = np.load(config["std_path"])
         self.window_size = config["window_size"]
-        self.split = split
 
         # Style
         with open(config["style_json"], "r") as f:
@@ -35,10 +34,25 @@ class TextStyleDataset(Dataset):
             content_idx = self.content_to_content_idx[content]
             for motion_id in motion_ids:
                 self.motion_to_content_idx[motion_id] = content_idx
+
+        self.content_prompts = {
+            "BR": "a person is running backward",
+            "BW": "a person is walking backward",
+            "FR": "a person is running forward",
+            "FW": "a person is walking forward",
+            "ID": "a person is standing still",
+            "SR": "a person is running sideways",
+            "SW": "a person is walking sideways",
+        }
+        
+        exclude_keys = ["TR1", "TR2", "TR3"]
+        self.exclude_content_idcs = {
+            self.content_to_content_idx[k] for k in exclude_keys
+            if k in self.content_to_content_idx
+        }
         
         # Metadata (?)
-        self.items = []
-        self.lengths = []
+        self.items, self.lengths = [], []
         for style_idx, motion_ids in self.style_map.items():
             for motion_id in motion_ids:
                 motion_path = os.path.join(config["motion_dir"], f"{motion_id}.npy")
@@ -46,17 +60,19 @@ class TextStyleDataset(Dataset):
                 if motion.shape[0] < self.window_size:
                     continue
 
-                text_path   = os.path.join(config["text_dir"], f"{motion_id}.txt")
-                captions = []
-                with open(text_path, "r") as f:
-                    for line in f:
-                        parts = line.strip().split("#")
-                        if parts and parts[0]:
-                            captions.append(parts[0].strip())
+                # text_path   = os.path.join(config["text_dir"], f"{motion_id}.txt")
+                # captions = []
+                # with open(text_path, "r") as f:
+                #     for line in f:
+                #         parts = line.strip().split("#")
+                #         if parts and parts[0]:
+                #             captions.append(parts[0].strip())
 
                 content_idx = self.motion_to_content_idx[motion_id]
+                if content_idx is None or content_idx in self.exclude_content_idcs:
+                    continue
 
-                self.items.append({"motion_id": motion_id, "captions": captions, "style_idx": style_idx, "content_idx": content_idx})
+                self.items.append({"motion_id": motion_id, "style_idx": style_idx, "content_idx": content_idx})
                 self.lengths.append(motion.shape[0] - self.window_size)
         self.cumsum = np.cumsum([0] + self.lengths)
 
@@ -72,14 +88,16 @@ class TextStyleDataset(Dataset):
             offset = 0
 
         meta = self.items[motion_idx]
-        motion_id, captions, style_idx, content_idx = meta["motion_id"], meta["captions"], meta["style_idx"], meta["content_idx"]
+        motion_id, style_idx, content_idx = meta["motion_id"], meta["style_idx"], meta["content_idx"]
 
         start, end = offset, offset + self.window_size
         motion = np.load(os.path.join(self.motion_dir, f"{motion_id}.npy"), mmap_mode="r")
         window = motion[start:end]
         window = (window - self.mean) / self.std
         window = torch.tensor(window, dtype=torch.float32)
-        caption = random.choice(captions) if self.split == "train" else captions[0]
+
+        content_id = self.content_idx_to_content[content_idx]
+        caption = self.content_prompts[content_id]
         return window, caption, style_idx, content_idx
 
 

@@ -116,7 +116,7 @@ class Text2StylizedMotion(nn.Module):
         noisy_latent = self.scheduler.add_noise(latent, noise, timesteps)
 
         # Predict the noise
-        pred, attn_list = self.denoiser.forward(noisy_latent, timesteps, text, len_mask=len_mask)
+        pred, attn_list = self.denoiser.forward(noisy_latent, timesteps, text, len_mask=len_mask, style=style)
         pred = pred * len_mask[..., None, None].float()
 
         return {
@@ -165,12 +165,3 @@ class Text2StylizedMotion(nn.Module):
 
         stylized_motion = self.vae.decode(z)
         return stylized_motion, text
-            
-
-        # Latent
-        # latent, _ = self.vae.encode(motion)
-        # len_mask = F.pad(len_mask, (0, latent.shape[1] - len_mask.shape[1]), mode="constant", value=False)
-        # latent = latent * len_mask[..., None, None].float()
-
-        # Style embedding
-        # style = self.style_encoder(latent)

@@ -64,7 +64,7 @@ if __name__ == "__main__":
 
     # --- Dataset & Loader --- #
     dataset_cfg = config['dataset']
-    train_dataset = TextStyleDataset(dataset_cfg, train_styles, split="train");
+    train_dataset = TextStyleDataset(dataset_cfg, train_styles)
     valid_dataset = TextStyleDataset(dataset_cfg, valid_styles)
 
     sampler_cfg = config['sampler']
@@ -85,7 +85,6 @@ if __name__ == "__main__":
     # --- Losses & Scaler --- #
     loss_cfg = config['loss']
     loss_fns = {name: LOSS_REGISTRY[name] for name in loss_cfg}
-    # scaler = LossScaler(scaler_cfg)
 
     # --- Early Stopper --- #
     early_cfg = config['early']
@@ -101,7 +100,7 @@ if __name__ == "__main__":
 
         pbar = tqdm(train_loader, desc=f"[Train] Epoch {epoch}")
         batch_idx = -1
-        for batch_idx, (motion, text, style_idx) in enumerate(pbar):
+        for batch_idx, (motion, text, style_idx, content_idx) in enumerate(pbar):
             motion, style_idx = motion.to(device), style_idx.to(device)
             out = model(motion, text, style_idx)
             losses = {}
@@ -139,7 +138,7 @@ if __name__ == "__main__":
         with torch.no_grad():
             pbar = tqdm(valid_loader, desc=f"[Valid] Epoch {epoch if epoch is not None else ''}".strip())
             batch_idx = -1
-            for batch_idx, (motion, text, style_idx) in enumerate(pbar):
+            for batch_idx, (motion, text, style_idx, content_idx) in enumerate(pbar):
                 motion, style_idx = motion.to(device), style_idx.to(device)
                 out = model(motion, text, style_idx)
                 losses = {}

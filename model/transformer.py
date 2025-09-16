@@ -30,7 +30,7 @@ class DenseFiLM(nn.Module):
         x  = self.linear[0](cond)
         y0 = self.linear[1](x)
 
-        if self.use_lora and style is not None:
+        if self.use_lora:
             delta = self.lora(x.unsqueeze(1), style).squeeze(1)
             y = y0 + delta
         else:
@@ -81,7 +81,7 @@ class MultiheadAttention(nn.Module):
         v = self.Wv(v_in)
 
         # LoRA
-        if self.use_lora and style is not None:
+        if self.use_lora:
             q = q + self.q_lora(q_in, style)
             k = k + self.k_lora(k_in, style)
             v = v + self.v_lora(v_in, style)
@@ -223,10 +223,10 @@ class STTransformerLayer(nn.Module):
         S = style.size(-1) if style is not None else None
 
         # Diffusion timestep embedding
-        skel_cond = self.skel_film(cond)
-        temp_cond = self.temp_film(cond)
-        cross_cond = self.cross_film(cond)
-        ffn_cond = self.ffn_film(cond)
+        skel_cond = self.skel_film(cond, style=style)
+        temp_cond = self.temp_film(cond, style=style)
+        cross_cond = self.cross_film(cond, style=style)
+        ffn_cond = self.ffn_film(cond, style=style)
 
         # Temporal attention
         x_t = x.transpose(1, 2).reshape(B * J, T, D)

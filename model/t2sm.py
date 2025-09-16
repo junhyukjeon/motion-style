@@ -154,7 +154,7 @@ class Text2StylizedMotion(nn.Module):
         text = ["a person is walking forward"] * B
 
         # sa_weights, ta_weights, ca_weights = [], [], []
-        for timestep in tqdm(timesteps, desc="Reverse diffusion", leave=False):
+        for timestep in tqdm(timesteps, desc="Reverse diffusion"):
             pred_uncond, _ = self.denoiser.forward(z, timestep, [""]*B, len_mask=len_mask, need_attn=False)
             pred_cond, (sa, ta, ca) = self.denoiser.forward(z, timestep, text, len_mask=len_mask, need_attn=True, style=style)
             pred = pred_uncond + self.config['scale'] * (pred_cond - pred_uncond)

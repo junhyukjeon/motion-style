@@ -21,6 +21,20 @@ class TextStyleDataset(Dataset):
         self.style_to_style_idx = {style: i for i, style in enumerate(styles_sorted)}
         self.style_idx_to_style = {i: style for style, i in self.style_to_style_idx.items()}
         self.style_map          = {self.style_to_style_idx[style]: style_map[style] for style in styles}
+
+        # Content
+        with open(config["content_json"], "r") as f:
+            content_map = json.load(f)
+        contents_sorted = sorted(content_map.keys())
+        self.content_to_content_idx = {c: i for i, c in enumerate(contents_sorted)}
+        self.content_idx_to_content = {i: c for c, i in self.content_to_content_idx.items()}
+
+        # Motion ID to content index
+        self.motion_to_content_idx = {}
+        for content, motion_ids in content_map.items():
+            content_idx = self.content_to_content_idx[content]
+            for motion_id in motion_ids:
+                self.motion_to_content_idx[motion_id] = content_idx
         
         # Metadata (?)
         self.items = []
@@ -40,7 +54,9 @@ class TextStyleDataset(Dataset):
                         if parts and parts[0]:
                             captions.append(parts[0].strip())
 
-                self.items.append({"motion_id": motion_id, "captions": captions, "style_idx": style_idx})
+                content_idx = self.motion_to_content_idx[motion_id]
+
+                self.items.append({"motion_id": motion_id, "captions": captions, "style_idx": style_idx, "content_idx": content_idx})
                 self.lengths.append(motion.shape[0] - self.window_size)
         self.cumsum = np.cumsum([0] + self.lengths)
 
@@ -56,7 +72,7 @@ class TextStyleDataset(Dataset):
             offset = 0
 
         meta = self.items[motion_idx]
-        motion_id, captions, style_idx = meta["motion_id"], meta["captions"], meta["style_idx"]
+        motion_id, captions, style_idx, content_idx = meta["motion_id"], meta["captions"], meta["style_idx"], meta["content_idx"]
 
         start, end = offset, offset + self.window_size
         motion = np.load(os.path.join(self.motion_dir, f"{motion_id}.npy"), mmap_mode="r")
@@ -64,7 +80,7 @@ class TextStyleDataset(Dataset):
         window = (window - self.mean) / self.std
         window = torch.tensor(window, dtype=torch.float32)
         caption = random.choice(captions) if self.split == "train" else captions[0]
-        return window, caption, style_idx
+        return window, caption, style_idx, content_idx
 
 
 # class StyleDataset(Dataset):

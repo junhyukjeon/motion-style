@@ -48,6 +48,7 @@ model:
       num_heads: 8
   text_drop: 0.1
   style_drop: 0.0
+  scale: 1
 
 # --- Losses --- #
 loss:

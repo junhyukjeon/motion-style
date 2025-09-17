@@ -173,7 +173,7 @@ if __name__ == "__main__":
     std = np.load(dataset_cfg["std_path"])
     std = torch.tensor(std, dtype=torch.float32, device=device)
 
-    target_style_idx = 1
+    target_style_idx = 0
     target_style     = dataset.style_idx_to_style[target_style_idx]
     sampler_cfg = config['sampler']
     sampler = StyleSampler(sampler_cfg, dataset, target_style=target_style_idx)

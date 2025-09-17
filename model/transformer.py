@@ -30,7 +30,7 @@ class DenseFiLM(nn.Module):
         x  = self.linear[0](cond)
         y0 = self.linear[1](x)
 
-        if self.use_lora:
+        if self.use_lora and style is not None:
             delta = self.lora(x.unsqueeze(1), style).squeeze(1)
             y = y0 + delta
         else:

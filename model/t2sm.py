@@ -151,7 +151,7 @@ class Text2StylizedMotion(nn.Module):
         # Style latent
         style = self.style_encoder(latent)
 
-        text = ["a person is walking forward"] * B
+        # text = ["a person is walking forward"] * B
 
         # sa_weights, ta_weights, ca_weights = [], [], []
         for timestep in tqdm(timesteps, desc="Reverse diffusion"):

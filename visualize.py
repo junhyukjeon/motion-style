@@ -180,7 +180,7 @@ if __name__ == "__main__":
     loader = DataLoader(dataset, batch_sampler=sampler, num_workers=0)
 
     batch = next(iter(loader))
-    motions, captions, style_idcs = batch
+    motions, captions, style_idcs, content_idcs = batch
     motions = motions.to(device)
 
     stylized, captions = model.generate(motions, captions)

@@ -18,7 +18,6 @@ from data.sampler import SAMPLER_REGISTRY
 from model.t2sm import Text2StylizedMotion
 from utils.train.early_stop import EarlyStopper
 from utils.train.loss import LOSS_REGISTRY
-# from utils.train.loss_scaler import LossScaler
 # from utils.plot import plot_tsne
 
 

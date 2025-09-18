@@ -121,7 +121,7 @@ class LossScaler:
                 self._update_stats(name, raw)
 
             w   = float(self._weight(name))
-            mode = self._cfg(name, "mode", "rms")
+            mode = self._cfg(name, "mode", "off")
             tau  = float(self._cfg(name, "tau", 1e-3))
             cap  = self._cfg(name, "cap", None)
             cap  = float(cap) if cap is not None else None

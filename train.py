@@ -38,7 +38,7 @@ def compute_raw_losses(loss_fns, loss_cfg, model, out, labels):
     losses = {}
     for name, fn in loss_fns.items():
         spec = loss_cfg[name]
-        if name == "stylecon":
+        if "stylecon" in name:
             style_loss, content_loss = fn(spec, model, out, labels)
             losses["style"]   = (None, style_loss)
             losses["content"] = (None, content_loss)
@@ -85,7 +85,7 @@ def calibrate(model, train_loader, device, loss_cfg, loss_fns, scaler, optimizer
     print("📏 Burn-in calibration complete. Frozen denominators:", scaler.frozen_denom)
 
 
-def train(model, loader, device, loss_cfg, loss_fns, scaler, optimizer, writer=None, epoch=None, clip_grad=5.0):
+def train(model, loader, device, loss_cfg, loss_fns, scaler, optimizer, writer=None, epoch=None, clip_grad=5.0, log_freq=50):
     model.train()
     losses_scaled_sum = defaultdict(float)
     losses_raw_sum    = defaultdict(float)
@@ -127,6 +127,14 @@ def train(model, loader, device, loss_cfg, loss_fns, scaler, optimizer, writer=N
 
         if MAX_TRAIN_BATCHES is not None and (b_idx + 1) >= MAX_TRAIN_BATCHES:
             break
+
+        if epoch is not None and writer is not None and (((epoch - 1) * len(loader) + b_idx) % log_freq == 0):
+            iter_num = (epoch - 1) * len(loader) + b_idx
+            writer.add_scalar("Train_Iter/Raw/Total", sum(losses_raw_sum.values()) / max(b_idx + 1, 1), iter_num)
+            writer.add_scalar("Train_Iter/Scaled/Total", sum(losses_scaled_sum.values()) / max(b_idx + 1, 1), iter_num)
+            for name in losses_scaled_sum.keys():
+                writer.add_scalar(f"Train_Iter/Raw/{name}",    losses_raw_sum[name]    / max(b_idx + 1, 1), iter_num)
+                writer.add_scalar(f"Train_Iter/Scaled/{name}", losses_scaled_sum[name] / max(b_idx + 1, 1), iter_num)
 
     # epoch averages
     num_batches = max(b_idx + 1, 1)
@@ -281,9 +289,10 @@ if __name__ == "__main__":
     MAX_TRAIN_BATCHES = 1000000
 
     best_val_loss = float('inf')
-    model.encoder.vae.freeze()
+    if hasattr(model, 'encoder') and hasattr(model.encoder, 'vae'):
+        model.encoder.vae.freeze()
     
-    calibrate(model, train_loader, device, loss_cfg, loss_fns, scaler, optimizer, K=2000)
+    # calibrate(model, train_loader, device, loss_cfg, loss_fns, scaler, optimizer, K=2000)
 
     for epoch in range(1, config['epochs'] + 1):
         # train_sampler.generate_batches()
@@ -301,6 +310,7 @@ if __name__ == "__main__":
             writer=writer,
             epoch=epoch,
             clip_grad=5.0,
+            log_freq=50,
         )
 
         # --- Validate ---

@@ -23,6 +23,9 @@ def plot_tsne(model, loader, device, epoch=None, title="valid", result_dir="", l
             out = model.encode(motions)
             z_style = out["z_style"]
 
+            if isinstance(z_style, list):
+                z_style = z_style[-1]
+
             if z_style.dim() == 4:                 # [B, T, J, D]
                 z_style = z_style.mean(dim=(1, 2)) 
 

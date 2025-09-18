@@ -56,7 +56,7 @@ def load_config():
 def load_model(config, device):
     model_cfg = config['model']
     model = NETWORK_REGISTRY[model_cfg['type']](model_cfg).to(device)
-    model.load_state_dict(torch.load(os.path.join(config["checkpoint_dir"], "best.ckpt"), map_location=device))
+    model.load_state_dict(torch.load(os.path.join(config["checkpoint_dir"], "best.ckpt"), map_location=device, weights_only=True))
     model.eval()
     return model
 

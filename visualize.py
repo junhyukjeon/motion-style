@@ -61,7 +61,7 @@ def load_config():
 def load_model(config, device):
     model_cfg = config['model']
     model = NETWORK_REGISTRY[model_cfg['type']](model_cfg).to(device)
-    model.load_state_dict(torch.load(os.path.join(config["checkpoint_dir"], "best.ckpt"), map_location=device))
+    model.load_state_dict(torch.load(os.path.join(config["checkpoint_dir"], "best.ckpt"), map_location=device, weights_only=True))
     model.eval()
     return model
 
@@ -76,7 +76,7 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
+from matplotlib.animation import FuncAnimation, FFMpegWriter, PillowWriter
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 
@@ -206,8 +206,10 @@ def plot_triple_3d_motion(
         return tuple(traj_lines) + tuple(l for lines in bone_lines for l in lines) + tuple(planes)
 
     ani = FuncAnimation(fig, update, frames=T, interval=1000 / fps, repeat=False)
-    ani.save(save_path, fps=fps)
+    writer = FFMpegWriter(fps=fps, codec='mpeg4')
+    ani.save(save_path, writer=writer)
     plt.close(fig)
+
 
 
 if __name__ == "__main__":
@@ -239,11 +241,31 @@ if __name__ == "__main__":
     reset_dir(output_dir)
 
     # === [1] Load reference style motion
+    # --- Style Split ---
+    from sklearn.model_selection import train_test_split
+    with open(config["style_json"]) as f:
+        full_label_to_ids = json.load(f)
+
+    all_styles_sorted = sorted(full_label_to_ids.keys())
+    global_style_to_label = {style: i for i, style in enumerate(all_styles_sorted)}
+    global_label_to_style = {i: style for style, i in global_style_to_label.items()}
+
+    non_neutral_styles = [s for s in all_styles_sorted if s != "Neutral"]
+    train_styles, valid_styles = train_test_split(non_neutral_styles, test_size=config['valid_size'], random_state=config["random_seed"])
+    train_styles.append("Neutral")
+    valid_styles.append("Neutral")
+
     # style_idx = 1540217
     # style_idx = 815700
     style_idx = 0
-    style_motion, _, _, style_motion_id = dataset[style_idx]
-    style_motion = style_motion.unsqueeze(0).to(device)  # [1, T, J, D]
+    # rnd_style = random.choice(train_styles)
+    for i in range(len(dataset)):
+        style_motion, style_label, _, style_motion_id = dataset[i]
+        # if global_label_to_style[style_label] in valid_styles:
+        if global_label_to_style[style_label] in train_styles:
+        # if global_label_to_style[style_label] == rnd_style:
+            style_motion = style_motion.unsqueeze(0).to(device)  # [1, T, J, D]
+            break
 
     # Find label name for style_motion_id
     for label, ids in label_to_ids.items():
@@ -255,7 +277,8 @@ if __name__ == "__main__":
 
     with torch.no_grad():
         out = model.encode(style_motion)
-        z_style_swap = out["z_style"].expand(32, -1)
+        # z_style_swap = out["z_style"].expand(32, -1)
+        z_style_swap = out["z_style"].expand(32, -1, -1, -1)
         # z_style_swap = z_style_swap * 0
 
     print(f"🎨 Using style from motion ID: {style_motion_id} (label: {style_label})")

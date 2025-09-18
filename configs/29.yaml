@@ -16,41 +16,36 @@ valid_size: 19
 # --- Sampler Settings --- #
 sampler:
   type: StyleSampler
-  batch_size: 32
-  samples_per_class: 16
+  batch_size: 128
+  samples_per_class: 8
 
 # --- Training Hyperparameters --- #
 epochs: 100
-lr: 0.001
+lr: 0.0001
 
 # --- Losses --- #
 loss:
-  recon:
+  recon_v2:
     weight: 1.0
   supcon:
     weight: 1.0
-    anchor: true
+    anchor: false
     temperature: 0.07
-  stylecon:
-    weight: 1.0
-  anchor:
+  cycle:
     weight: 1.0
 
 # --- Model --- #
 model:
   type: StyleContentNet
   style_content_encoder:
-    type: StyleContentEncoder
-    latent_dim: 256
-    n_heads: 4
-    dropout: 0.1
+    type: StyleContentEncoderSeven
     n_layers: 2
+    dropout: 0.1
   style_content_decoder:
-    type: StyleContentDecoder
-    latent_dim: 256
-    n_heads: 4
-    dropout: 0.1
+    type: StyleContentDecoderSeven
     n_layers: 2
+    n_heads: 8
+    dropout: 0.1
 
 # --- Early Stopper --- #
 early:

@@ -16,7 +16,7 @@ class EarlyStopper:
         if self.is_improvement(metric):
             self.best = metric
             self.best_epoch = epoch
-            self.bad_epochs = 0
+            self.bad_epochs = 0 
             return False  # do not stop
         else:
             self.bad_epochs += 1

@@ -51,7 +51,6 @@ class TextStyleDataset(Dataset):
             if k in self.content_to_content_idx
         }
         
-        # Metadata (?)
         self.items, self.lengths = [], []
         for style_idx, motion_ids in self.style_map.items():
             for motion_id in motion_ids:

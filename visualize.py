@@ -24,8 +24,6 @@ from model.networks import NETWORK_REGISTRY
 from model.t2sm import Text2StylizedMotion
 from utils.motion import recover_from_ric
 from utils.skel import Skeleton
-from utils.train.early_stop import EarlyStopper
-from utils.train.loss import LOSS_REGISTRY
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -173,7 +171,7 @@ if __name__ == "__main__":
     std = np.load(dataset_cfg["std_path"])
     std = torch.tensor(std, dtype=torch.float32, device=device)
 
-    target_style_idx = 0
+    target_style_idx = 3
     target_style     = dataset.style_idx_to_style[target_style_idx]
     sampler_cfg = config['sampler']
     sampler = StyleSampler(sampler_cfg, dataset, target_style=target_style_idx)

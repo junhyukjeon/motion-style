@@ -81,7 +81,7 @@ class Text2StylizedMotion(nn.Module):
             clip_sample=False,
         )
 
-    def forward(self, motion, text, style_idx):
+    def forward(self, batch):
         # Random drop for text
         text = [
             "" if np.random.rand(1) < self.config['text_drop'] else t for t in text
@@ -151,7 +151,7 @@ class Text2StylizedMotion(nn.Module):
         # Style latent
         style = self.style_encoder(latent)
 
-        # text = ["a person is walking forward"] * B
+        text = ["a person is walking forward"] * B
 
         # sa_weights, ta_weights, ca_weights = [], [], []
         for timestep in tqdm(timesteps, desc="Reverse diffusion"):

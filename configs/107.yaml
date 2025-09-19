@@ -18,7 +18,7 @@ dataset:
 sampler:
   type: TrainSampler
   batch_size: 32
-  samples_per_style: 4
+  samples_per_style: 8
 
 # --- Model --- #
 model:
@@ -48,7 +48,7 @@ model:
       num_heads: 8
   text_drop: 0.1
   style_drop: 0.0
-  scale: 7.5
+  scale: 1
 
 # --- Losses --- #
 loss:

@@ -16,9 +16,10 @@ from tqdm import tqdm
 from data.dataset import TextStyleDataset
 from data.sampler import SAMPLER_REGISTRY
 from model.t2sm import Text2StylizedMotion
-from utils.train.early_stop import EarlyStopper
+from utils.train.early_stopper import EarlyStopper
 from utils.train.loss import LOSS_REGISTRY
-# from utils.plot import plot_tsne
+from utils.train.loss_scaler import LossScaler
+from utils.plot import plot_tsne
 
 
 def set_seed(seed=42):
@@ -84,10 +85,20 @@ if __name__ == "__main__":
     # --- Losses & Scaler --- #
     loss_cfg = config['loss']
     loss_fns = {name: LOSS_REGISTRY[name] for name in loss_cfg}
+    
+    scaler_cfg = config['scaler']
+    scaler   = LossScaler(scaler_cfg)
 
     # --- Early Stopper --- #
     early_cfg = config['early']
     early = EarlyStopper(early_cfg)
+
+    # --- Calibration --- #
+    model.train()
+    pbar = tqdm(zip(range(K), train_loader), total=K,)
+    for _, batch in pbar:
+        out = model.encode(batch)
+
 
     # --- Training --- #
     best_val_loss = float('inf')
@@ -99,9 +110,9 @@ if __name__ == "__main__":
 
         pbar = tqdm(train_loader, desc=f"[Train] Epoch {epoch}")
         batch_idx = -1
-        for batch_idx, (motion, text, style_idx, content_idx) in enumerate(pbar):
+        for batch_idx, batch in enumerate(pbar):
             motion, style_idx = motion.to(device), style_idx.to(device)
-            out = model(motion, text, style_idx)
+            out = model(batch)
             losses = {}
             total_loss = 0.0
             for name, fn in loss_fns.items():
@@ -173,11 +184,11 @@ if __name__ == "__main__":
             os.makedirs(config["checkpoint_dir"], exist_ok=True)
             torch.save(model.state_dict(), os.path.join(config["checkpoint_dir"], "latest.ckpt"))
 
-            if early.is_improvement(val_total_raw):
-                print(f"✅ New best at epoch {epoch} (Val task: {val_total_raw:.4f})")
+            if early.is_improvement(val_total_scaled):
+                print(f"✅ New best at epoch {epoch} (Val task: {val_total_scaled:.4f})")
                 torch.save(model.state_dict(), os.path.join(config["checkpoint_dir"], "best.ckpt"))
 
-            if early.step(val_total_raw, epoch):
+            if early.step(val_total_scaled, epoch):
                 print(f"⏹️ Early stopping at epoch {epoch} "
                     f"(best task={early.best:.4f} at epoch {early.best_epoch})")
                 break

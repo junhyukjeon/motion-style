@@ -18,7 +18,6 @@ from data.sampler import SAMPLER_REGISTRY
 from model.t2sm import Text2StylizedMotion
 from utils.train.early_stopper import EarlyStopper
 from utils.train.loss import LOSS_REGISTRY
-from utils.train.loss_scaler import LossScaler
 from utils.plot import plot_tsne
 
 
@@ -34,11 +33,9 @@ def load_config():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, required=True, help='Path to config file (YAML)')
     args = parser.parse_args()
-
     config_path = args.config
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
-
     config_basename = os.path.basename(config_path)
     config["run_name"] = os.path.splitext(config_basename)[0]
     config["result_dir"] = os.path.join(config["result_dir"], config["run_name"])
@@ -83,22 +80,47 @@ if __name__ == "__main__":
     )
 
     # --- Losses & Scaler --- #
-    loss_cfg = config['loss']
-    loss_fns = {name: LOSS_REGISTRY[name] for name in loss_cfg}
-    
-    scaler_cfg = config['scaler']
-    scaler   = LossScaler(scaler_cfg)
+    loss_cfg     = config['loss']
+    loss_fns     = {name: LOSS_REGISTRY[name] for name in loss_cfg}
 
     # --- Early Stopper --- #
     early_cfg = config['early']
     early = EarlyStopper(early_cfg)
 
     # --- Calibration --- #
+    scales  = {}
+    sum_sq  = defaultdict(float)
     model.train()
-    pbar = tqdm(zip(range(K), train_loader), total=K,)
+    pbar = tqdm(zip(range(config['steps']), train_loader), total=config['steps'])
+    n = 0
     for _, batch in pbar:
-        out = model.encode(batch)
+        out = model(batch)
+        losses = {}
+        for name, fn in loss_fns.items():
+            spec = loss_cfg[name]
+            raw  = fn(spec, model, out)
+            losses[name] = raw
 
+        for name, val in losses.items():
+            sum_sq[name] += float(val.detach()) ** 2
+
+        total_loss = None
+        for name, val in losses.items():
+            scaled     = loss_cfg[name]['weight'] * val
+            total_loss = scaled if total_loss is None else total_loss + scaled
+
+        optimizer.zero_grad(set_to_none=True)
+        total_loss.backward()
+        optimizer.step()
+
+        pbar.set_postfix(loss=float(total_loss.item()))
+        n += 1
+
+    for name, s2 in sum_sq.items():
+        rms = (s2 / max(1, n)) ** 0.5
+        scales[name] = max(rms, config['tau'])
+
+    print("📏 Frozen RMS denominators:", {k: round(v, 6) for k, v in scales.items()})
 
     # --- Training --- #
     best_val_loss = float('inf')
@@ -106,79 +128,89 @@ if __name__ == "__main__":
         # Train
         model.train()
         losses_scaled_sum = defaultdict(float)
+        losses_norm_sum   = defaultdict(float)
         losses_raw_sum    = defaultdict(float)
 
         pbar = tqdm(train_loader, desc=f"[Train] Epoch {epoch}")
         batch_idx = -1
         for batch_idx, batch in enumerate(pbar):
-            motion, style_idx = motion.to(device), style_idx.to(device)
             out = model(batch)
             losses = {}
             total_loss = 0.0
             for name, fn in loss_fns.items():
                 spec   = loss_cfg[name]
                 raw    = fn(spec, model, out)
-                scaled = raw * spec['weight']
-                losses[name] = (scaled, raw)
+                norm   = raw / scales[name]
+                scaled = norm * spec['weight']
+                losses[name] = (scaled, norm, raw)
                 total_loss = total_loss + scaled
             optimizer.zero_grad(set_to_none=True)
             total_loss.backward()
             optimizer.step()
             pbar.set_postfix(loss=float(total_loss.item()))
-            for name, (scaled, raw) in losses.items():
+            for name, (scaled, norm, raw) in losses.items():
                 losses_scaled_sum[name] += scaled.item()
+                losses_norm_sum[name]   += norm.item()
                 losses_raw_sum[name]    += raw.item()
 
         num_batches = max(batch_idx + 1, 1)
         train_total_scaled = sum(losses_scaled_sum.values()) / max(num_batches, 1)
+        train_total_norm = sum(losses_norm_sum.values()) / max(num_batches, 1)
         train_total_raw = sum(losses_raw_sum.values()) / max(num_batches, 1)
 
         if writer is not None and epoch is not None:
             writer.add_scalar("Train/Raw/Total", train_total_raw, epoch)
+            writer.add_scalar("Train/Norm/Total", train_total_norm, epoch)
             writer.add_scalar("Train/Scaled/Total", train_total_scaled, epoch)
             for name in losses_scaled_sum.keys():
                 writer.add_scalar(f"Train/Raw/{name}",    losses_raw_sum[name]    / max(num_batches,1), epoch)
+                writer.add_scalar(f"Train/Norm/{name}",   losses_norm_sum[name]   / max(num_batches,1), epoch)
                 writer.add_scalar(f"Train/Scaled/{name}", losses_scaled_sum[name] / max(num_batches,1), epoch)
 
         # Validate
         model.eval()
         losses_scaled_sum = defaultdict(float)
+        losses_norm_sum   = defaultdict(float)
         losses_raw_sum    = defaultdict(float)
 
         with torch.no_grad():
             pbar = tqdm(valid_loader, desc=f"[Valid] Epoch {epoch if epoch is not None else ''}".strip())
             batch_idx = -1
-            for batch_idx, (motion, text, style_idx, content_idx) in enumerate(pbar):
-                motion, style_idx = motion.to(device), style_idx.to(device)
-                out = model(motion, text, style_idx)
+            for batch_idx, batch in enumerate(pbar):
+                out = model(batch)
                 losses = {}
                 total_loss = 0.0
                 for name, fn in loss_fns.items():
                     spec   = loss_cfg[name]
                     raw    = fn(spec, model, out)
-                    scaled = raw * spec['weight']
-                    losses[name] = (scaled, raw)
+                    norm   = raw / scales[name]
+                    scaled = norm * spec['weight']
+                    losses[name] = (scaled, norm, raw)
                     total_loss = total_loss + scaled
                 pbar.set_postfix(loss=float(total_loss.item()))
-                for name, (scaled, raw) in losses.items():
+                for name, (scaled, norm, raw) in losses.items():
                     losses_scaled_sum[name] += scaled.item()
+                    losses_norm_sum[name]   += norm.item()
                     losses_raw_sum[name]    += raw.item()
 
             num_batches = max(batch_idx + 1, 1)
             val_total_scaled = sum(losses_scaled_sum.values()) / num_batches
+            val_total_norm   = sum(losses_norm_sum.values()) / num_batches
             val_total_raw    = sum(losses_raw_sum.values())  / num_batches
 
             if writer is not None and epoch is not None:
                 writer.add_scalar("Valid/Raw/Total",    val_total_raw,    epoch)
+                writer.add_scalar("Valid/Norm/Total",   val_total_norm,   epoch)
                 writer.add_scalar("Valid/Scaled/Total", val_total_scaled, epoch)
                 for name in losses_scaled_sum.keys():
                     writer.add_scalar(f"Valid/Raw/{name}",    losses_raw_sum[name]    / num_batches, epoch)
+                    writer.add_scalar(f"Valid/Norm/{name}",   losses_norm_sum[name]   / num_batches, epoch)
                     writer.add_scalar(f"Valid/Scaled/{name}", losses_scaled_sum[name] / num_batches, epoch)
 
             print(
                 f"Epoch {epoch} | "
-                f"Train scaled: {train_total_scaled:.4f} | Train raw: {train_total_raw:.4f} | "
-                f"Valid scaled: {val_total_scaled:.4f} | Valid raw: {val_total_raw:.4f} | "
+                f"Train scaled: {train_total_scaled:.4f} | Train norm: {train_norm_raw:.4f} | Train raw: {train_total_raw:.4f} | "
+                f"Valid scaled: {val_total_scaled:.4f} | Valid norm: {valid_norm_raw:.4f} | Valid raw: {val_total_raw:.4f} | "
             )
 
             os.makedirs(config["checkpoint_dir"], exist_ok=True)

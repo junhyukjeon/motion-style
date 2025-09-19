@@ -16,29 +16,21 @@ def plot_tsne(model, loader, device, epoch=None, title="valid", result_dir="", l
 
     pbar = tqdm(total=max_samples, desc=f"[t-SNE 3D] Extracting ({title})")
     with torch.no_grad():
-        for motions, labels, _, _ in loader:
-            motions = motions.to(device)
-            labels = labels.to(device)
-
-            out = model.encode(motions)
-            z_style = out["z_style"]
-
-            if z_style.dim() == 4:                 # [B, T, J, D]
-                z_style = z_style.mean(dim=(1, 2)) 
-
-            z_style = z_style.cpu()
-            labels = labels.cpu()
+        for batch in loader:
+            style, style_idx = model.style(batch)
+            # style = style.cpu()
+            # style_idx = style_idx.cpu()
 
             remaining = max_samples - sum(len(l) for l in all_labels)
             if remaining <= 0:
                 break
 
-            z_style = z_style[:remaining]
-            labels = labels[:remaining]
+            style     = style[:remaining]
+            style_idx = style_idx[:remaining]
 
-            all_embeddings.append(z_style)
-            all_labels.append(labels)
-            pbar.update(len(z_style))
+            all_embeddings.append(style.cpu())
+            all_labels.append(style_idx.cpu())
+            pbar.update(len(style))
 
     pbar.close()
 

@@ -18,7 +18,7 @@ dataset:
 sampler:
   type: TrainSampler
   batch_size: 32
-  samples_per_style: 8
+  samples_per_style: 4
 
 # --- Model --- #
 model:
@@ -52,7 +52,7 @@ model:
 # --- Losses --- #
 loss:
   velocity:
-    weight: 1.0
+    weight: 2.0
   supcon:
     weight: 1.0
     temperature: 0.07
@@ -65,7 +65,7 @@ early:
 
 # --- Calibration --- #
 steps: 1000
-tau: 1e-3
+tau: 0.001
 
 # --- Training --- #
 epochs: 100

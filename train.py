@@ -209,8 +209,15 @@ if __name__ == "__main__":
 
             print(
                 f"Epoch {epoch} | "
-                f"Train scaled: {train_total_scaled:.4f} | Train norm: {train_norm_raw:.4f} | Train raw: {train_total_raw:.4f} | "
-                f"Valid scaled: {val_total_scaled:.4f} | Valid norm: {valid_norm_raw:.4f} | Valid raw: {val_total_raw:.4f} | "
+                f"Train scaled: {train_total_scaled:.4f} | Train norm: {train_total_norm:.4f} | Train raw: {train_total_raw:.4f} | "
+                f"Valid  scaled: {val_total_scaled:.4f}   | Valid norm: {val_total_norm:.4f}   | Valid raw: {val_total_raw:.4f} | "
+            )
+
+            plot_tsne(
+                model, valid_loader, device, epoch, title="valid",
+                result_dir=config["result_dir"],
+                label_to_name_dict=valid_dataset.style_idx_to_style,
+                writer=writer
             )
 
             os.makedirs(config["checkpoint_dir"], exist_ok=True)

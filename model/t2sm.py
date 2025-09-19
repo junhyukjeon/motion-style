@@ -84,7 +84,7 @@ class Text2StylizedMotion(nn.Module):
     def forward(self, batch):
         # To device
         motion, text, style_idx, content_idx = batch
-        motion, style_idx = motion.to(device), style_idx.to(device)
+        motion, style_idx = motion.to(self.device), style_idx.to(self.device)
         B, T     = motion.shape[0], motion.shape[1] // 4
         lengths  = torch.full((B,), T, device=motion.device, dtype=torch.long)
         len_mask = lengths_to_mask(lengths)
@@ -102,9 +102,7 @@ class Text2StylizedMotion(nn.Module):
 
         # Style embedding
         style = self.style_encoder(latent)
-
-        import pdb; pdb.set_trace()
-
+        idx = torch.arange(style.shape[0], device=style.device)
         style = style[idx ^ 1]
 
         # Sample diffusion timesteps
@@ -132,6 +130,24 @@ class Text2StylizedMotion(nn.Module):
             "style": style,
             "style_idx": style_idx
         }
+
+    @torch.no_grad()
+    def style(self, batch):
+        motion, text, style_idx, content_idx = batch
+        motion, style_idx = motion.to(self.device), style_idx.to(self.device)
+        B, T     = motion.shape[0], motion.shape[1] // 4
+        lengths  = torch.full((B,), T, device=motion.device, dtype=torch.long)
+        len_mask = lengths_to_mask(lengths)
+
+        # Latent
+        with torch.no_grad():
+            latent, _ = self.vae.encode(motion)
+            len_mask = F.pad(len_mask, (0, latent.shape[1] - len_mask.shape[1]), mode="constant", value=False)
+            latent = latent * len_mask[..., None, None].float()
+
+        # Style embedding
+        style = self.style_encoder(latent)
+        return style, style_idx
 
     @torch.no_grad()
     def generate(self, motion, text):

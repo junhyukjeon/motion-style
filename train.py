@@ -71,6 +71,8 @@ if __name__ == "__main__":
     train_loader  = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=8)
     valid_loader = DataLoader(valid_dataset, batch_sampler=valid_sampler, num_workers=8)
 
+    # import pdb; pdb.set_trace()
+    
     # --- Model --- #
     model_cfg = config['model']
     model = Text2StylizedMotion(model_cfg).to(device)

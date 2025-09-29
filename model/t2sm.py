@@ -149,6 +149,10 @@ class Text2StylizedMotion(nn.Module):
         style = self.style_encoder(latent)
         return style, style_idx
 
+    # @torch.no_grad()
+    # def generate(self, motions, texts):
+        
+
     @torch.no_grad()
     def generate(self, batch):
         motion, text, style_idx, content_idx = batch

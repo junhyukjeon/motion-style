@@ -285,13 +285,16 @@ if __name__ == "__main__":
     loader = DataLoader(dataset, batch_sampler=sampler, num_workers=0)
 
     batch = next(iter(loader))
-    # motions, captions, style_idcs, content_idcs = batch
-    # motions = motions.to(device)
+    motions, captions, style_idcs, content_idcs = batch
+    motions = motions.to(device)
+
+    import pdb; pdb.set_trace()
 
     stylized, captions = model.generate(batch)
     stylized = stylized * std + mean
     idx = torch.arange(stylized.shape[0], device=stylized.device)
-    reference = stylized[idx ^ 1]
+    reference = motions * std + mean
+    reference = reference[idx ^ 1]
 
     joints_stylized = recover_from_ric(stylized, 22).detach().cpu().numpy()
     joints_reference = recover_from_ric(reference, 22).detach().cpu().numpy()

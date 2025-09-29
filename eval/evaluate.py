@@ -51,7 +51,7 @@ class SmoodiEval():
         assert len(set(self.cassifier_styles) & set(badly_proccesd_styles)) == 0
 
         # init model and metrics
-        self.metrics = TM2TMetrics()
+        self.metrics = TM2TMetrics().to(dist_util.dev())
         
         self.text_enc, self.motion_enc, self.movement_enc = build_evaluators({
             'dataset_name': 't2m',
@@ -74,6 +74,10 @@ class SmoodiEval():
         # self.model.load_state_dict(torch.load(os.path.join(args.config["checkpoint_dir"], "best.ckpt"), map_location=dist_util.dev()))
         self.model.eval()
         
+        # Save
+        self.save_dir = os.path.join(args.config["result_dir"], "samples")
+        os.makedirs(self.save_dir, exist_ok=True)
+        self.sample_idx = 0  # running counter across batches
   
     # def _style_to_model(self, style):
     #     if not self.args.lora_finetune:
@@ -108,13 +112,13 @@ class SmoodiEval():
                 rs_set["our_predicted"],
                 rs_set["label"],
                 rs_set["joints_gen"],
-                            )
+            )
 
     def _procces_batch(self, batch, gen_style):   
         # batch = [word_embeddings, pos_one_hots, caption, sent_len, motion, m_length, tokens]
         
-        # gt_motions = batch[4].permute(0, 2,1) # B J F
         word_embs, pos_ohot, texts, text_lengths, gt_motions, lengths, *_ = batch
+        # gt_motions = batch[4].permute(0, 2,1) # B J F
         gt_motions = gt_motions.to(dist_util.dev()).float()
         lengths = lengths.to(dist_util.dev())
         # lengths = batch[5]
@@ -125,8 +129,22 @@ class SmoodiEval():
 
         # sample.shape = # B J 1 F
         sample = self._sample(texts, lengths, gt_motions)
+
+        # >>> save generated motions here <<<
+        save_dir = os.path.join(self.args.config["result_dir"], "raw_samples")
+        os.makedirs(save_dir, exist_ok=True)
+
+        # detach to cpu numpy
+        np.save(
+            os.path.join(save_dir, f"sample_{self.sample_idx:06d}.npy"),
+            sample.detach().cpu().numpy()
+        )
+        self.sample_idx += 1
+        # <<< end saving >>>
+
         sample = sample.permute(0, 2, 1).unsqueeze(2) # B J 1 F
-        
+        gt_motions = gt_motions.permute(0, 2, 1).unsqueeze(2)
+
         # style classification
         logits = self.classifier(sample, lengths.to(dist_util.dev()))
 
@@ -152,6 +170,7 @@ class SmoodiEval():
         m_lens = m_lens[align_idx]
         m_lens = torch.div(m_lens, 4, rounding_mode="floor")
         
+
         gen_motion_mov = self.movement_enc(gen_motions_renorm_t2m[..., :-4].squeeze(1)).detach()
         gen_motion_embeddings = self.motion_enc(gen_motion_mov, m_lens)
         gt_motion_mov = self.movement_enc(gt_motions_renorm_t2m[..., :-4].squeeze(1)).detach()
@@ -179,10 +198,11 @@ class SmoodiEval():
         batch_size = gt_motions.shape[0]
         n_frames = 196
         
-        # TODO: generation
-        sample = self.model.generate(gt_motions, texts)
+        batch = [gt_motions, texts, torch.zeros(32), torch.zeros(32)]
 
-        return sample
+        # TODO: generation
+        sample = self.model.generate(batch)
+        return sample[0]
     
     def finish(self):
         metrics_dict, count_seq = self.metrics.compute()

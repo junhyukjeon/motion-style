@@ -7,34 +7,38 @@ from torch.utils.data import Dataset
 
 
 class TextStyleDataset(Dataset):
-    def __init__(self, config, styles):
+    def __init__(self, config, styles, train=True):
         self.motion_dir  = config["motion_dir"]
         self.mean        = np.load(config["mean_path"])
         self.std         = np.load(config["std_path"])
-        self.window_size = config["window_size"]
-
-        # Style
+        self.unit_length = config["unit_length"]
+        self.min_frames  = config["min_frames"]
+        self.max_frames  = config["max_frames"]
+        self.train       = train
+        
+        # --- style map (indices stable) ---
         with open(config["style_json"], "r") as f:
-            style_map = json.load(f)
-        styles_sorted = sorted(style_map.keys())
-        self.style_to_style_idx = {style: i for i, style in enumerate(styles_sorted)}
-        self.style_idx_to_style = {i: style for style, i in self.style_to_style_idx.items()}
-        self.style_map          = {self.style_to_style_idx[style]: style_map[style] for style in styles}
+            style_map_all = json.load(f)  # {style_name: [motion_ids]}
+        styles_sorted = sorted(style_map_all.keys())
+        self.style_to_style_idx = {s: i for i, s in enumerate(styles_sorted)}
+        self.style_idx_to_style = {i: s for s, i in self.style_to_style_idx.items()}
+        self.style_map = {self.style_to_style_idx[s]: style_map_all[s] for s in styles}
 
-        # Content
+        # --- content map ---
         with open(config["content_json"], "r") as f:
-            content_map = json.load(f)
+            content_map = json.load(f)  # {content_key: [motion_ids]}
         contents_sorted = sorted(content_map.keys())
         self.content_to_content_idx = {c: i for i, c in enumerate(contents_sorted)}
         self.content_idx_to_content = {i: c for c, i in self.content_to_content_idx.items()}
 
-        # Motion ID to content index
+        # motion_id -> content_idx
         self.motion_to_content_idx = {}
-        for content, motion_ids in content_map.items():
-            content_idx = self.content_to_content_idx[content]
-            for motion_id in motion_ids:
-                self.motion_to_content_idx[motion_id] = content_idx
+        for content_key, mids in content_map.items():
+            cidx = self.content_to_content_idx[content_key]
+            for mid in mids:
+                self.motion_to_content_idx[mid] = cidx
 
+        # captions (same spirit as yours)
         self.content_prompts = {
             "BR": "a person is running backward",
             "BW": "a person is walking backward",
@@ -44,147 +48,173 @@ class TextStyleDataset(Dataset):
             "SR": "a person is running sideways",
             "SW": "a person is walking sideways",
         }
-        
-        exclude_keys = ["TR1", "TR2", "TR3"]
+
+        # exclude TR1/2/3 contents
+        exclude_keys = {"TR1", "TR2", "TR3"}
         self.exclude_content_idcs = {
-            self.content_to_content_idx[k] for k in exclude_keys
-            if k in self.content_to_content_idx
+            self.content_to_content_idx[k]
+            for k in exclude_keys if k in self.content_to_content_idx
         }
-        
-        self.items, self.lengths = [], []
+
+        # --- one item per motion (no sliding windows) ---
+        self.items = []  # [{"motion_id", "style_idx", "content_idx", "length"}]
         for style_idx, motion_ids in self.style_map.items():
             for motion_id in motion_ids:
-                motion_path = os.path.join(config["motion_dir"], f"{motion_id}.npy")
-                motion      = np.load(motion_path, mmap_mode="r")
-                if motion.shape[0] < self.window_size:
+                path = os.path.join(self.motion_dir, f"{motion_id}.npy")
+                if not os.path.exists(path):
                     continue
-
-                # text_path   = os.path.join(config["text_dir"], f"{motion_id}.txt")
-                # captions = []
-                # with open(text_path, "r") as f:
-                #     for line in f:
-                #         parts = line.strip().split("#")
-                #         if parts and parts[0]:
-                #             captions.append(parts[0].strip())
-
-                content_idx = self.motion_to_content_idx[motion_id]
-                if content_idx is None or content_idx in self.exclude_content_idcs:
+                arr = np.load(path, mmap_mode="r")
+                T = int(arr.shape[0])
+                if T < self.min_frames:
                     continue
-
-                self.items.append({"motion_id": motion_id, "style_idx": style_idx, "content_idx": content_idx})
-                self.lengths.append(motion.shape[0] - self.window_size)
-        self.cumsum = np.cumsum([0] + self.lengths)
+                cidx = self.motion_to_content_idx.get(motion_id, None)
+                if cidx is None or cidx in self.exclude_content_idcs:
+                    continue
+                self.items.append({
+                    "motion_id": motion_id,
+                    "style_idx": style_idx,
+                    "content_idx": cidx,
+                    "length": T
+                })
 
     def __len__(self):
-        return int(self.cumsum[-1])
+        return len(self.items)
 
-    def __getitem__(self, idx):
-        if idx != 0:
-            motion_idx = np.searchsorted(self.cumsum, idx) - 1
-            offset = idx - self.cumsum[motion_idx] - 1
+    def __getitem__(self, idx: int):
+        meta = self.items[idx]
+        motion = np.load(os.path.join(self.motion_dir, f"{meta['motion_id']}.npy"), mmap_mode="r")
+        T, D = int(motion.shape[0]), int(motion.shape[1])
+        U = self.unit_length
+        if U <= 0:
+            m_length = T
         else:
-            motion_idx = 0
-            offset = 0
+            k = max(1, T // U)
+            # if self.train and U < 10 and k > 1 and (np.random.rand() < (1.0/3.0)):
+            #     k = k - 1
+            m_length = k * U
 
-        meta = self.items[motion_idx]
-        motion_id, style_idx, content_idx = meta["motion_id"], meta["style_idx"], meta["content_idx"]
+        if self.max_frames is not None:
+            m_length = min(m_length, self.max_frames)
+        m_length = max(1, min(m_length, T))  # safety clamp
 
-        start, end = offset, offset + self.window_size
-        motion = np.load(os.path.join(self.motion_dir, f"{motion_id}.npy"), mmap_mode="r")
-        window = motion[start:end]
-        window = (window - self.mean) / self.std
+        # --- pick start ---
+        if self.train:
+            start_max = max(0, T - m_length)
+            s = 0 if start_max == 0 else random.randint(0, start_max)
+        else:
+            # center crop at eval/inference
+            s = max(0, (T - m_length) // 2)
+
+        clip = motion[s:s + m_length]  # (m_length, D)                         # (m_length, D)
+
+        # --- z-normalize ---
+        window = (clip - self.mean) / self.std
         window = torch.tensor(window, dtype=torch.float32)
 
-        content_id = self.content_idx_to_content[content_idx]
-        caption = self.content_prompts[content_id]
-        return window, caption, style_idx, content_idx
+        # --- always right-pad to max_frames if provided ---
+        if self.max_frames is not None and m_length < self.max_frames:
+            pad = torch.zeros(self.max_frames - m_length, D, dtype=window.dtype)
+            window = torch.cat([window, pad], dim=0)  # (max_frames, D)
+
+        # caption from content key
+        content_key = self.content_idx_to_content[meta["content_idx"]]
+        caption = self.content_prompts.get(content_key, "a person is moving")
+
+        return window, caption, meta["style_idx"], meta["content_idx"]
 
 
-class TextStyleDataset2(Dataset):
-    def __init__(self, config, styles):
-        self.motion_dir  = config["motion_dir"]
-        self.mean        = np.load(config["mean_path"])
-        self.std         = np.load(config["std_path"])
-        # self.window_size = config["window_size"]
+# class TextStyleDataset(Dataset):
+#     def __init__(self, config, styles):
+#         self.motion_dir  = config["motion_dir"]
+#         self.mean        = np.load(config["mean_path"])
+#         self.std         = np.load(config["std_path"])
+#         self.window_size = config["window_size"]
 
-        # Style
-        with open(config["style_json"], "r") as f:
-            style_map = json.load(f)
-        styles_sorted = sorted(style_map.keys())
-        self.style_to_style_idx = {style: i for i, style in enumerate(styles_sorted)}
-        self.style_idx_to_style = {i: style for style, i in self.style_to_style_idx.items()}
-        self.style_map          = {self.style_to_style_idx[style]: style_map[style] for style in styles}
+#         # Style
+#         with open(config["style_json"], "r") as f:
+#             style_map = json.load(f)
+#         styles_sorted = sorted(style_map.keys())
+#         self.style_to_style_idx = {style: i for i, style in enumerate(styles_sorted)}
+#         self.style_idx_to_style = {i: style for style, i in self.style_to_style_idx.items()}
+#         self.style_map          = {self.style_to_style_idx[style]: style_map[style] for style in styles}
 
-        # Content
-        with open(config["content_json"], "r") as f:
-            content_map = json.load(f)
-        contents_sorted = sorted(content_map.keys())
-        self.content_to_content_idx = {c: i for i, c in enumerate(contents_sorted)}
-        self.content_idx_to_content = {i: c for c, i in self.content_to_content_idx.items()}
+#         # Content
+#         with open(config["content_json"], "r") as f:
+#             content_map = json.load(f)
+#         contents_sorted = sorted(content_map.keys())
+#         self.content_to_content_idx = {c: i for i, c in enumerate(contents_sorted)}
+#         self.content_idx_to_content = {i: c for c, i in self.content_to_content_idx.items()}
 
-        # Motion ID to content index
-        self.motion_to_content_idx = {}
-        for content, motion_ids in content_map.items():
-            content_idx = self.content_to_content_idx[content]
-            for motion_id in motion_ids:
-                self.motion_to_content_idx[motion_id] = content_idx
+#         # Motion ID to content index
+#         self.motion_to_content_idx = {}
+#         for content, motion_ids in content_map.items():
+#             content_idx = self.content_to_content_idx[content]
+#             for motion_id in motion_ids:
+#                 self.motion_to_content_idx[motion_id] = content_idx
 
-        self.content_prompts = {
-            "BR": "a person is running backward",
-            "BW": "a person is walking backward",
-            "FR": "a person is running forward",
-            "FW": "a person is walking forward",
-            "ID": "a person is standing still",
-            "SR": "a person is running sideways",
-            "SW": "a person is walking sideways",
-        }
+#         self.content_prompts = {
+#             "BR": "a person is running backward",
+#             "BW": "a person is walking backward",
+#             "FR": "a person is running forward",
+#             "FW": "a person is walking forward",
+#             "ID": "a person is standing still",
+#             "SR": "a person is running sideways",
+#             "SW": "a person is walking sideways",
+#         }
         
-        exclude_keys = ["TR1", "TR2", "TR3"]
-        self.exclude_content_idcs = {
-            self.content_to_content_idx[k] for k in exclude_keys
-            if k in self.content_to_content_idx
-        }
+#         exclude_keys = ["TR1", "TR2", "TR3"]
+#         self.exclude_content_idcs = {
+#             self.content_to_content_idx[k] for k in exclude_keys
+#             if k in self.content_to_content_idx
+#         }
         
-        self.items = []
-        for style_idx, motion_ids in self.style_map.items():
-            for motion_id in motion_ids:
-                motion_path = os.path.join(config["motion_dir"], f"{motion_id}.npy")
-                motion      = np.load(motion_path, mmap_mode="r")
-                num_frames  = motion.shape[0]
-                if num_frames < config['min_frames']:
-                    continue
+#         self.items, self.lengths = [], []
+#         for style_idx, motion_ids in self.style_map.items():
+#             for motion_id in motion_ids:
+#                 motion_path = os.path.join(config["motion_dir"], f"{motion_id}.npy")
+#                 motion      = np.load(motion_path, mmap_mode="r")
+#                 if motion.shape[0] < self.window_size:
+#                     continue
 
-                content_idx = self.motion_to_content_idx[motion_id]
-                if content_idx is None or content_idx in self.exclude_content_idcs:
-                    continue
+#                 # text_path   = os.path.join(config["text_dir"], f"{motion_id}.txt")
+#                 # captions = []
+#                 # with open(text_path, "r") as f:
+#                 #     for line in f:
+#                 #         parts = line.strip().split("#")
+#                 #         if parts and parts[0]:
+#                 #             captions.append(parts[0].strip())
 
-                self.items.append({"motion_id": motion_id, "style_idx": style_idx, "content_idx": content_idx})
-                self.lengths.append(motion.shape[0] - self.window_size)
-        self.cumsum = np.cumsum([0] + self.lengths)
+#                 content_idx = self.motion_to_content_idx[motion_id]
+#                 if content_idx is None or content_idx in self.exclude_content_idcs:
+#                     continue
 
-    def __len__(self):
-        return int(self.cumsum[-1])
+#                 self.items.append({"motion_id": motion_id, "style_idx": style_idx, "content_idx": content_idx})
+#                 self.lengths.append(motion.shape[0] - self.window_size)
+#         self.cumsum = np.cumsum([0] + self.lengths)
 
-    def __getitem__(self, idx):
-        if idx != 0:
-            motion_idx = np.searchsorted(self.cumsum, idx) - 1
-            offset = idx - self.cumsum[motion_idx] - 1
-        else:
-            motion_idx = 0
-            offset = 0
+#     def __len__(self):
+#         return int(self.cumsum[-1])
 
-        meta = self.items[motion_idx]
-        motion_id, style_idx, content_idx = meta["motion_id"], meta["style_idx"], meta["content_idx"]
+#     def __getitem__(self, idx):
+#         if idx != 0:
+#             motion_idx = np.searchsorted(self.cumsum, idx) - 1
+#             offset = idx - self.cumsum[motion_idx] - 1
+#         else:
+#             motion_idx = 0
+#             offset = 0
 
-        start, end = offset, offset + self.window_size
-        motion = np.load(os.path.join(self.motion_dir, f"{motion_id}.npy"), mmap_mode="r")
-        window = motion[start:end]
-        window = (window - self.mean) / self.std
-        window = torch.tensor(window, dtype=torch.float32)
+#         meta = self.items[motion_idx]
+#         motion_id, style_idx, content_idx = meta["motion_id"], meta["style_idx"], meta["content_idx"]
 
-        content_id = self.content_idx_to_content[content_idx]
-        caption = self.content_prompts[content_id]
-        return window, caption, style_idx, content_idx
+#         start, end = offset, offset + self.window_size
+#         motion = np.load(os.path.join(self.motion_dir, f"{motion_id}.npy"), mmap_mode="r")
+#         window = motion[start:end]
+#         window = (window - self.mean) / self.std
+#         window = torch.tensor(window, dtype=torch.float32)
+
+#         content_id = self.content_idx_to_content[content_idx]
+#         caption = self.content_prompts[content_id]
+#         return window, caption, style_idx, content_idx
 
 
 # class Text2MotionDataset(data.Dataset):

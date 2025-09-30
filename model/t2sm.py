@@ -178,8 +178,6 @@ class Text2StylizedMotion(nn.Module):
         idx = torch.arange(style.shape[0], device=style.device)
         # style = style[idx ^ 1]
 
-        text = ["a person is walking straight"] * B
-
         # sa_weights, ta_weights, ca_weights = [], [], []
         for timestep in tqdm(timesteps, desc="Reverse diffusion"):
             pred_uncond, _ = self.denoiser.forward(z, timestep, [""]*B, len_mask=len_mask, need_attn=False)

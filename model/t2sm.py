@@ -154,9 +154,8 @@ class Text2StylizedMotion(nn.Module):
         
 
     @torch.no_grad()
-    def generate(self, batch):
-        motion, text, style_idx, content_idx = batch
-        motion, style_idx = motion.to(self.device), style_idx.to(self.device)
+    def generate(self, motion, text):
+        motion = motion.to(self.device)
         B, T     = motion.shape[0], motion.shape[1] // 4
         lengths  = torch.full((B,), T, device=motion.device, dtype=torch.long)
         len_mask = lengths_to_mask(lengths)
@@ -177,9 +176,9 @@ class Text2StylizedMotion(nn.Module):
         # Style latent
         style = self.style_encoder(latent)
         idx = torch.arange(style.shape[0], device=style.device)
-        style = style[idx ^ 1]
+        # style = style[idx ^ 1]
 
-        # text = ["a person is walking forward"] * B
+        text = ["a person is walking straight"] * B
 
         # sa_weights, ta_weights, ca_weights = [], [], []
         for timestep in tqdm(timesteps, desc="Reverse diffusion"):

@@ -198,10 +198,11 @@ class SmoodiEval():
         batch_size = gt_motions.shape[0]
         n_frames = 196
         
-        batch = [gt_motions, texts, torch.zeros(32), torch.zeros(32)]
+        import pdb; pdb.set_trace()
+        # batch = [gt_motions, texts, torch.zeros(32), torch.zeros(32)]
 
         # TODO: generation
-        sample = self.model.generate(batch)
+        sample = self.model.generate(gt_motions, texts)
         return sample[0]
     
     def finish(self):
@@ -215,7 +216,7 @@ def main():
     args.batch_size = 32
     args.config = load_config(args.config)
     fixseed(args.seed)
-    dist_util.setup_dist(args.device)  
+    dist_util.setup_dist(args.device)
     with torch.no_grad():
         eval = SmoodiEval(args, lora_base_path='save/lora')
         eval._procees_dataset()

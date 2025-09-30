@@ -81,7 +81,7 @@ class MultiheadAttention(nn.Module):
         v = self.Wv(v_in)
 
         # LoRA
-        if self.use_lora:
+        if self.use_lora and style is not None:
             q = q + self.q_lora(q_in, style)
             k = k + self.k_lora(k_in, style)
             v = v + self.v_lora(v_in, style)

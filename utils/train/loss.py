@@ -74,6 +74,63 @@ def loss_supcon(config, model, out):
 #     return (norms - 1.0).pow(2).mean()
     
 
+def loss_cycle(config, model, out, labels):
+    z_style = out["z_style"]     # [B, ...]
+    z_content = out["z_content"] # [B, ...]
+
+    # random permutation of styles
+    perm = torch.randperm(z_style.size(0), device=z_style.device)
+    z_fused = model.decode(z_style[perm].detach(), z_content)
+    out_fused = model.encoder.forward_from_latent(z_fused)
+
+    # cycle consistency
+    z_cycle = model.decode(z_style, out_fused["z_content"])
+
+    cycle_loss = F.mse_loss(z_cycle, out["z_latent"])
+
+    return cycle_loss
+
+
+def loss_cycle_v2(config, model, out, labels):
+    z_style = out["z_style"]     # [B, ...]
+    z_content = out["z_content"] # [B, ...]
+
+    # random permutation of styles
+    perm = torch.randperm(z_style.size(0), device=z_style.device)
+    z_fused = model.decode(z_style[perm].detach(), z_content)
+    out_fused = model.encoder.forward_from_latent(z_fused)
+
+    # cycle consistency
+    z_cycle = model.decode(z_style, out_fused["z_content"])
+    content_cycle_loss = F.mse_loss(z_cycle, out["z_latent"])
+
+    # root loss
+    pred_root = model.encoder.vae.decode(out["z_latent"])[..., :3]
+    pred_root_cycle = model.encoder.vae.decode(z_cycle)[..., :3]
+    root_cycle_loss = F.mse_loss(pred_root_cycle, pred_root)
+
+    return content_cycle_loss + root_cycle_loss
+
+
+def loss_cycle_v3(config, model, out, labels):
+    z_style = out["z_style"]     # [B, ...]
+    z_content = out["z_content"] # [B, ...]
+
+    # random permutation of styles
+    perm = torch.randperm(z_style.size(0), device=z_style.device)
+    z_fused = model.decode(z_style[perm], z_content)
+    out_fused = model.encoder.forward_from_latent(z_fused)
+
+    # cycle consistency
+    z_cycle = model.decode(z_style, out_fused["z_content"])
+
+    cycle_z_loss = F.mse_loss(z_cycle, out["z_latent"])
+    cycle_c_loss = F.mse_loss(out_fused["z_content"], z_content)
+    cycle_s_loss = F.mse_loss(out_fused["z_style"], z_style[perm])
+
+    return cycle_loss
+
+
 LOSS_REGISTRY = {
     "velocity": loss_velocity,
     "supcon": loss_supcon,

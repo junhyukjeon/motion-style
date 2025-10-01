@@ -77,6 +77,7 @@ def load_config():
 
 def load_model(config, device):
     model_cfg = config['model']
+<<<<<<< HEAD
     model = Text2StylizedMotion(model_cfg).to(device)
     model.load_state_dict(torch.load(os.path.join(config["checkpoint_dir"], "best.ckpt"), map_location=device))
     model.eval()
@@ -96,6 +97,35 @@ def _preprocess_motion(joints):
     return d, mn, mx, traj, d.shape[0]
 
 def plot_pair_3d_motion(
+=======
+    model = NETWORK_REGISTRY[model_cfg['type']](model_cfg).to(device)
+    model.load_state_dict(torch.load(os.path.join(config["checkpoint_dir"], "best.ckpt"), map_location=device, weights_only=True))
+    model.eval()
+    return model
+
+
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation, FFMpegWriter, PillowWriter
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+
+import numpy as np
+import matplotlib
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+def plot_triple_3d_motion(
+>>>>>>> a259b41980b31d02bb0dee1bdc08f3f7b7844c9e
     save_path,
     kinematic_tree,
     joints_a,          # (T, 22, 3) stylized
@@ -119,6 +149,7 @@ def plot_pair_3d_motion(
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
     fig = plt.figure(figsize=figsize)
+<<<<<<< HEAD
     axL = fig.add_subplot(1, 2, 1, projection="3d")
     axR = fig.add_subplot(1, 2, 2, projection="3d")
     for ax, title in ((axL, titles[0]), (axR, titles[1])):
@@ -181,7 +212,92 @@ def plot_pair_3d_motion(
         return (ltrajL, ltrajR, planeL, planeR, *linesL, *linesR)
 
     FuncAnimation(fig, update, frames=T, interval=1000 / fps, repeat=False).save(save_path, fps=fps)
+=======
+    axG = fig.add_subplot(1, 3, 1, projection='3d')
+    axR = fig.add_subplot(1, 3, 2, projection='3d')
+    axS = fig.add_subplot(1, 3, 3, projection='3d')
+    axes  = [axG, axR, axS]
+    clips = [G,   R,   S]
+    titles = [title_gt, title_recon, title_swap]
+
+    for ax, title in zip(axes, titles):
+        ax.set_xlim3d([-radius / 2, radius / 2])
+        ax.set_ylim3d([0, radius])
+        ax.set_zlim3d([0, radius])
+        ax.set_title(title, fontsize=12)
+        ax.grid(False)
+        ax.set_axis_off()  # same effect as plt.axis('off') but scoped to this ax
+        ax.view_init(elev=120, azim=-90)
+        try: ax.dist = 7.5
+        except Exception: pass
+
+    fig.suptitle(f"{title_gt} | {title_recon} | {title_swap}", fontsize=16)
+
+    # ----- initialize artists once -----
+    planes = []
+    traj_lines = []
+    bone_lines = []   # list per-axes, each contains per-chain line
+    for ax in axes:
+        # simple initial plane (will update verts each frame)
+        verts0 = [[-radius/2, 0, 0],
+                  [-radius/2, 0, radius],
+                  [ radius/2, 0, radius],
+                  [ radius/2, 0, 0]]
+        plane = Poly3DCollection([verts0])
+        plane.set_facecolor((0.5, 0.5, 0.5, 0.5))
+        ax.add_collection3d(plane)
+        planes.append(plane)
+
+        # past trajectory line
+        line_traj, = ax.plot([], [], [], linewidth=1.0, color='blue')
+        traj_lines.append(line_traj)
+
+        # skeleton chain lines
+        lines = []
+        for ci, chain in enumerate(kinematic_tree):
+            lw = 4.0 if ci < 5 else 2.0
+            line, = ax.plot([], [], [], linewidth=lw, color=colors[ci % len(colors)])
+            lines.append(line)
+        bone_lines.append(lines)
+
+    # ----- per-frame update -----
+    def update(idx):
+        for ax, plane, ltraj, lines, clip in zip(axes, planes, traj_lines, bone_lines, clips):
+            data, traj, mins, maxs = clip["data"], clip["traj"], clip["mins"], clip["maxs"]
+
+            # update ground plane verts to follow global XZ bounds relative to current root
+            px0, px1 = mins[0] - traj[idx, 0], maxs[0] - traj[idx, 0]
+            pz0, pz1 = mins[2] - traj[idx, 1], maxs[2] - traj[idx, 1]
+            plane.set_verts([[[px0, 0.0, pz0],
+                               [px0, 0.0, pz1],
+                               [px1, 0.0, pz1],
+                               [px1, 0.0, pz0]]])
+
+            # update past trajectory (XZ, centered)
+            if idx > 1:
+                x = traj[:idx, 0] - traj[idx, 0]
+                y = np.zeros_like(x)
+                z = traj[:idx, 1] - traj[idx, 1]
+                ltraj.set_data_3d(x, y, z)
+            else:
+                ltraj.set_data_3d([], [], [])
+
+            # update bones
+            for line, chain in zip(lines, kinematic_tree):
+                xs = data[idx, chain, 0]
+                ys = data[idx, chain, 1]
+                zs = data[idx, chain, 2]
+                line.set_data_3d(xs, ys, zs)
+
+        # return a flat tuple of artists for FuncAnimation (no blit)
+        return tuple(traj_lines) + tuple(l for lines in bone_lines for l in lines) + tuple(planes)
+
+    ani = FuncAnimation(fig, update, frames=T, interval=1000 / fps, repeat=False)
+    writer = FFMpegWriter(fps=fps, codec='mpeg4')
+    ani.save(save_path, writer=writer)
+>>>>>>> a259b41980b31d02bb0dee1bdc08f3f7b7844c9e
     plt.close(fig)
+
 
 
 if __name__ == "__main__":
@@ -206,8 +322,59 @@ if __name__ == "__main__":
     output_dir = os.path.join(config["result_dir"], "stylized")
     reset_dir(output_dir)
 
+<<<<<<< HEAD
     # -- Mean & Standard Deviation --- #
     mean = np.load(dataset_cfg["mean_path"])
+=======
+    # === [1] Load reference style motion
+    # --- Style Split ---
+    from sklearn.model_selection import train_test_split
+    with open(config["style_json"]) as f:
+        full_label_to_ids = json.load(f)
+
+    all_styles_sorted = sorted(full_label_to_ids.keys())
+    global_style_to_label = {style: i for i, style in enumerate(all_styles_sorted)}
+    global_label_to_style = {i: style for style, i in global_style_to_label.items()}
+
+    non_neutral_styles = [s for s in all_styles_sorted if s != "Neutral"]
+    train_styles, valid_styles = train_test_split(non_neutral_styles, test_size=config['valid_size'], random_state=config["random_seed"])
+    train_styles.append("Neutral")
+    valid_styles.append("Neutral")
+
+    # style_idx = 1540217
+    # style_idx = 815700
+    style_idx = 0
+    # rnd_style = random.choice(train_styles)
+    for i in range(len(dataset)):
+        style_motion, style_label, _, style_motion_id = dataset[i]
+        # if global_label_to_style[style_label] in valid_styles:
+        if global_label_to_style[style_label] in train_styles:
+        # if global_label_to_style[style_label] == rnd_style:
+            style_motion = style_motion.unsqueeze(0).to(device)  # [1, T, J, D]
+            break
+
+    # Find label name for style_motion_id
+    for label, ids in label_to_ids.items():
+        if style_motion_id in ids:
+            style_label = label
+            break
+    else:
+        raise ValueError(f"Could not find label for motion ID {style_motion_id}")
+
+    with torch.no_grad():
+        out = model.encode(style_motion)
+        # z_style_swap = out["z_style"].expand(32, -1)
+        z_style_swap = out["z_style"].expand(32, -1, -1, -1)
+        # z_style_swap = z_style_swap * 0
+
+    print(f"🎨 Using style from motion ID: {style_motion_id} (label: {style_label})")
+
+    # === [2] Sample 32 motions to swap content
+    sample_indices = random.sample(range(len(dataset)), 32)
+    batch_size = 32
+    batched_indices = [sample_indices[i:i+batch_size] for i in range(0, len(sample_indices), batch_size)]
+
+>>>>>>> a259b41980b31d02bb0dee1bdc08f3f7b7844c9e
     mean = torch.tensor(mean, dtype=torch.float32, device=device)
     std = np.load(dataset_cfg["std_path"])
     std = torch.tensor(std, dtype=torch.float32, device=device)

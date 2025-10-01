@@ -71,7 +71,7 @@ class SmoodiEval():
         self.data_loader = get_dataset_loader(name='humanml', batch_size=args.batch_size, num_frames=None, split='test', hml_mode='gt')
                
         self.model = Text2StylizedMotion(args.config["model"]).to(dist_util.dev())
-        # self.model.load_state_dict(torch.load(os.path.join(args.config["checkpoint_dir"], "best.ckpt"), map_location=dist_util.dev()))
+        self.model.load_state_dict(torch.load(os.path.join(args.config["checkpoint_dir"], "best.ckpt"), map_location=dist_util.dev()))
         self.model.eval()
         
         # Save

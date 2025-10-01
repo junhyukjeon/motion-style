@@ -102,8 +102,8 @@ class Text2StylizedMotion(nn.Module):
 
         # Style embedding
         style = self.style_encoder(latent)
-        idx = torch.arange(style.shape[0], device=style.device)
-        style = style[idx ^ 1]
+        # idx = torch.arange(style.shape[0], device=style.device)
+        # style = style[idx ^ 1]
 
         # Sample diffusion timesteps
         timesteps = torch.randint(

@@ -1,0 +1,77 @@
+# --- Run Management --- #
+run_name: auto
+result_dir: ./results
+checkpoint_dir: ./checkpoints/sc
+random_seed: 42
+
+# --- Dataset --- #
+dataset:
+  motion_dir  : ./dataset/100style/new_joint_vecs
+  text_dir    : ./dataset/100style/texts
+  mean_path   : ./checkpoints/t2m/Comp_v6_KLD005/meta/mean.npy
+  std_path    : ./checkpoints/t2m/Comp_v6_KLD005/meta/std.npy
+  style_json  : ./dataset/100style/100style_clean_clean.json
+  content_json: ./dataset/100style/10content_clean_clean.json
+  unit_length : 4
+  min_frames  : 128
+  max_frames  : 128
+
+# --- Sampler Settings --- #
+sampler:
+  type: TrainSampler
+  batch_size: 32
+  samples_per_style: 4
+
+# --- Model --- #
+model:
+  denoiser:
+    transformer:
+      layer:
+        attention:
+          lora:
+            type: HyperLoRA
+            rank: 8
+            scale: 1.0
+            style_dim: 256
+            in_dim: 256
+            out_dim: 256
+            hidden_dim: 512
+        film: {}
+  style_encoder: 
+    type: StyleTransformer
+    dropout: 0.1
+    style_dim: 256
+    num_layers: 2
+    num_queries: 4
+    block:
+      dropout: 0.1
+      style_dim: 256
+      hidden_dim: 256
+      num_heads: 8
+  text_drop: 0.1
+  style_drop: 0.1
+  text_weight: 7.5
+  style_weight: 3.5
+
+# --- Losses --- #
+loss:
+  velocity:
+    weight: 2.0
+  # supcon:
+  #   weight: 1.0
+  #   temperature: 0.07
+
+# --- Early Stopper --- #
+early:
+  patience: 10
+  min_delta: 0.0
+  mode: min
+
+# --- Calibration --- #
+steps: 300
+tau: 0.001
+
+# --- Training --- #
+epochs: 10000
+lr: 0.0001
+valid_size: 0.2

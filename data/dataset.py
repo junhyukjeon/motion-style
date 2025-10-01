@@ -38,7 +38,7 @@ class TextStyleDataset(Dataset):
             for mid in mids:
                 self.motion_to_content_idx[mid] = cidx
 
-        # captions (same spirit as yours)
+        # captions
         self.content_prompts = {
             "BR": "a person is running backward",
             "BW": "a person is walking backward",

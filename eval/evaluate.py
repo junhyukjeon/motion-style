@@ -118,14 +118,8 @@ class SmoodiEval():
         # batch = [word_embeddings, pos_one_hots, caption, sent_len, motion, m_length, tokens]
         
         word_embs, pos_ohot, texts, text_lengths, gt_motions, lengths, *_ = batch
-        # gt_motions = batch[4].permute(0, 2,1) # B J F
         gt_motions = gt_motions.to(dist_util.dev()).float()
         lengths = lengths.to(dist_util.dev())
-        # lengths = batch[5]
-        # word_embs = batch[0]
-        # pos_ohot = batch[1]
-        # texts = batch[2]
-        # text_lengths = batch[3]
 
         # sample.shape = # B J 1 F
         sample = self._sample(texts, lengths, gt_motions)
@@ -198,11 +192,11 @@ class SmoodiEval():
         batch_size = gt_motions.shape[0]
         n_frames = 196
         
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
         # batch = [gt_motions, texts, torch.zeros(32), torch.zeros(32)]
 
         # TODO: generation
-        sample = self.model.generate(gt_motions, texts)
+        sample = self.model.generate(gt_motions, texts, lengths=lengths // 4)
         return sample[0]
     
     def finish(self):

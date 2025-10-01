@@ -83,72 +83,6 @@ def load_model(config, device):
     model.eval()
     return model
 
-# def plot_single_3d_motion(
-#     save_path,
-#     kinematic_tree,
-#     joints,          # (T, 22, 3)
-#     title="Motion",
-#     figsize=(6, 6),
-#     fps=120,
-#     radius=4.0,
-# ):
-#     # Preprocess: lift to ground, center by root (x,z), keep traj for past path
-#     d = joints.copy().reshape(len(joints), -1, 3)
-#     mn, mx = d.min((0, 1)), d.max((0, 1))
-#     d[:, :, 1] -= mn[1]
-#     traj = d[:, 0, (0, 2)]
-#     d[..., 0] -= d[:, 0:1, 0]
-#     d[..., 2] -= d[:, 0:1, 2]
-#     T = d.shape[0]
-
-#     colors = ['red','blue','black','red','blue',
-#               'darkblue','darkblue','darkblue','darkblue','darkblue',
-#               'darkred','darkred','darkred','darkred','darkred']
-
-#     fig = plt.figure(figsize=figsize)
-#     ax = fig.add_subplot(1, 1, 1, projection="3d")
-#     ax.set(xlim=[-radius/2, radius/2], ylim=[0, radius], zlim=[0, radius], title=title)
-#     ax.grid(False); ax.set_axis_off(); ax.view_init(120, -90)
-
-#     # Ground plane
-#     plane = Poly3DCollection([[[-radius/2, 0, 0], [-radius/2, 0, radius],
-#                                [ radius/2, 0, radius], [ radius/2, 0, 0]]],
-#                              facecolor=(0.5, 0.5, 0.5, 0.5))
-#     ax.add_collection3d(plane)
-
-#     # Past trajectory line
-#     ltraj, = ax.plot([], [], [], linewidth=1.0)
-
-#     # Skeleton lines per chain
-#     lines = []
-#     for i, chain in enumerate(kinematic_tree):
-#         lw = 4.0 if i < 5 else 2.0
-#         line, = ax.plot([], [], [], linewidth=lw, color=colors[i % len(colors)])
-#         lines.append(line)
-
-#     def update(t):
-#         # Update plane around current root position using global bounds
-#         px0, px1 = mn[0] - traj[t, 0], mx[0] - traj[t, 0]
-#         pz0, pz1 = mn[2] - traj[t, 1], mx[2] - traj[t, 1]
-#         plane.set_verts([[[px0, 0, pz0], [px0, 0, pz1], [px1, 0, pz1], [px1, 0, pz0]]])
-
-#         # Update past trajectory (centered)
-#         if t > 0:
-#             x = traj[:t, 0] - traj[t, 0]
-#             z = traj[:t, 1] - traj[t, 1]
-#             ltraj.set_data_3d(x, np.zeros_like(x), z)
-#         else:
-#             ltraj.set_data_3d([], [], [])
-
-#         # Update bones for this frame
-#         for line, chain in zip(lines, kinematic_tree):
-#             line.set_data_3d(d[t, chain, 0], d[t, chain, 1], d[t, chain, 2])
-
-#         return (ltraj, *lines, plane)
-
-#     FuncAnimation(fig, update, frames=T, interval=1000 / fps, repeat=False).save(save_path, fps=fps)
-#     plt.close(fig)
-
 def _preprocess_motion(joints):
     # joints: (T, 22, 3)
     d = joints.copy().reshape(len(joints), -1, 3)
@@ -445,7 +379,7 @@ if __name__ == "__main__":
     std = np.load(dataset_cfg["std_path"])
     std = torch.tensor(std, dtype=torch.float32, device=device)
 
-    target_style_idx = 20
+    target_style_idx = 0
     target_style     = dataset.style_idx_to_style[target_style_idx]
     sampler_cfg = config['sampler']
     sampler = StyleSampler(sampler_cfg, dataset, target_style=target_style_idx)

@@ -192,7 +192,10 @@ class SmoodiEval():
         batch_size = gt_motions.shape[0]
         n_frames = 196
         
+<<<<<<< HEAD
         # import pdb; pdb.set_trace()
+=======
+>>>>>>> 17bcb7fad179346c6dbbd4760cb51aa4f12318d6
         # batch = [gt_motions, texts, torch.zeros(32), torch.zeros(32)]
 
         # TODO: generation

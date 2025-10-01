@@ -759,8 +759,10 @@ class HumanML3D(data.Dataset):
         self.mean = np.load(pjoin(opt.data_root, 'Mean.npy'))
         self.std = np.load(pjoin(opt.data_root, 'Std.npy'))
 
-        self.t2m_mean = np.load(pjoin(opt.checkpoints_dir, 't2m/Comp_v6_KLD005/meta', f'mean.npy'))
-        self.t2m_std = np.load(pjoin(opt.checkpoints_dir, 't2m/Comp_v6_KLD005/meta', f'std.npy'))
+        # self.t2m_mean = np.load(pjoin(opt.checkpoints_dir, 't2m/Comp_v6_KLD01/meta', f'mean.npy'))
+        # self.t2m_std = np.load(pjoin(opt.checkpoints_dir, 't2m/Comp_v6_KLD01/meta', f'std.npy'))
+        self.t2m_mean = np.load(pjoin('t2m/Comp_v6_KLD01/meta', f'mean.npy'))
+        self.t2m_std = np.load(pjoin('t2m/Comp_v6_KLD01/meta', f'std.npy'))
         
         self.split_file = pjoin(opt.data_root, f'{split}.txt')
         if mode == 'text_only':

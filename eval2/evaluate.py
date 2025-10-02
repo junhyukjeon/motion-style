@@ -69,9 +69,9 @@ class SmoodiEval():
         
         # model
         self.model = Text2StylizedMotion(config["model"]).to(device)
-        # self.model.load_state_dict(
-        #     torch.load(pjoin(config["checkpoint_dir"], "latest.ckpt"), map_location=device)
-        # ) # TODO: uncomment this and load the trained weights
+        self.model.load_state_dict(
+            torch.load(pjoin(config["checkpoint_dir"], "best.ckpt"), map_location=device)
+        ) # TODO: uncomment this and load the trained weights
         self.model.eval()
         for p in self.model.parameters():
             p.requires_grad = False
@@ -153,7 +153,9 @@ class SmoodiEval():
         text_lengths = batch["text_len"].detach().clone().cuda()
 
         start = time.time()
-        sample = self.model.generate(motions, texts, reference_motion)[0]
+        # sample = self.model.generate(motions, texts, reference_motion)[0]
+
+        sample = self.model.generate(reference_motion, texts)[0]
         end = time.time()
 
         logits = self.classifier(sample)

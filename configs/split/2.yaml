@@ -1,7 +1,7 @@
 # --- Run Management --- #
 run_name: auto
 result_dir: ./results
-checkpoint_dir: ./checkpoints/sc
+checkpoint_dir: ./checkpoints/t2sm
 random_seed: 42
 
 # --- Dataset --- #
@@ -19,8 +19,8 @@ dataset:
 # --- Sampler Settings --- #
 sampler:
   type: TrainSampler
-  batch_size: 32
-  samples_per_style: 4
+  batch_size: 64
+  samples_per_style: 8
 
 # --- Model --- #
 model:
@@ -41,12 +41,12 @@ model:
     type: StyleTransformer
     dropout: 0.1
     style_dim: 256
-    num_layers: 2
-    num_queries: 4
+    num_layers: 4
+    num_queries: 8
     block:
       dropout: 0.1
       style_dim: 256
-      hidden_dim: 256
+      hidden_dim: 512
       num_heads: 8
   text_drop: 0.1
   style_drop: 0.1
@@ -56,7 +56,7 @@ model:
 # --- Losses --- #
 loss:
   velocity:
-    weight: 2.0
+    weight: 1.0
   supcon:
     weight: 1.0
     temperature: 0.07
@@ -74,4 +74,4 @@ tau: 0.001
 # --- Training --- #
 epochs: 10000
 lr: 0.0001
-valid_size: 0.2
+valid_size: 0.4

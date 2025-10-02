@@ -115,27 +115,18 @@ if __name__ == "__main__":
         total_loss.backward()
         optimizer.step()
 
-<<<<<<< HEAD
         pbar.set_postfix(loss=float(total_loss.item()))
         n += 1
 
     for name, s2 in sum_sq.items():
         rms = (s2 / max(1, n)) ** 0.5
         scales[name] = max(rms, config['tau'])
-=======
-    best_val_loss = float('inf')
-    if hasattr(model, 'encoder') and hasattr(model.encoder, 'vae'):
-        model.encoder.vae.freeze()
-    
-    # calibrate(model, train_loader, device, loss_cfg, loss_fns, scaler, optimizer, K=2000)
->>>>>>> a259b41980b31d02bb0dee1bdc08f3f7b7844c9e
 
     print("📏 Frozen RMS denominators:", {k: round(v, 6) for k, v in scales.items()})
 
     # --- Training --- #
     best_val_loss = float('inf')
     for epoch in range(1, config['epochs'] + 1):
-<<<<<<< HEAD
         # Train
         model.train()
         losses_scaled_sum = defaultdict(float)
@@ -242,62 +233,3 @@ if __name__ == "__main__":
                 print(f"⏹️ Early stopping at epoch {epoch} "
                     f"(best task={early.best:.4f} at epoch {early.best_epoch})")
                 break
-=======
-        # train_sampler.generate_batches()
-        # valid_sampler.generate_batches()
-
-        # --- Train ---
-        train_scaled, train_raw = train(
-            model=model,
-            loader=train_loader,
-            device=device,
-            loss_cfg=loss_cfg,
-            loss_fns=loss_fns,
-            scaler=scaler,
-            optimizer=optimizer,
-            writer=writer,
-            epoch=epoch,
-            clip_grad=5.0,
-            log_freq=50,
-        )
-
-        # --- Validate ---
-        valid_scaled, valid_task = validate(   # valid_task = raw-weighted total
-            model=model,
-            loader=valid_loader,
-            device=device,
-            loss_cfg=loss_cfg,
-            loss_fns=loss_fns,
-            scaler=scaler,
-            writer=writer,
-            epoch=epoch
-        )
-
-        print(
-            f"Epoch {epoch} | "
-            f"Train scaled: {train_scaled:.4f} | Train raw: {train_raw:.4f} | "
-            f"Valid scaled: {valid_scaled:.4f} | Valid raw: {valid_task:.4f}"
-        )
-        model.train()  # ensure we’re back in train mode
-
-        # --- t-SNE, checkpoints, best model ---
-        plot_tsne(
-            model, valid_loader, device, epoch, title="valid",
-            result_dir=config["result_dir"],
-            label_to_name_dict=valid_dataset.label_to_style,
-            writer=writer
-        )
-
-        os.makedirs(config["checkpoint_dir"], exist_ok=True)
-        torch.save(model.state_dict(), os.path.join(config["checkpoint_dir"], "latest.ckpt"))
-
-        # Save best and early stop on the task metric
-        if early.is_improvement(valid_task):
-            print(f"✅ New best at epoch {epoch} (Val task: {valid_task:.4f})")
-            torch.save(model.state_dict(), os.path.join(config["checkpoint_dir"], "best.ckpt"))
-
-        if early.step(valid_task, epoch):
-            print(f"⏹️ Early stopping at epoch {epoch} "
-                f"(best task={early.best:.4f} at epoch {early.best_epoch})")
-            break
->>>>>>> a259b41980b31d02bb0dee1bdc08f3f7b7844c9e

@@ -9,8 +9,9 @@ import numpy as np
 import yaml
 import time
 import random
+from tqdm import tqdm
 
-from eval2.dataset import Text2MotionTestDataset, build_dict_from_txt
+from eval2.dataset import Text2MotionTestDataset #, build_dict_from_txt
 from eval2.metrics import TM2TMetrics
 from eval2.evaluator_wrapper import StyleClassification
 
@@ -22,6 +23,19 @@ from salad.utils.word_vectorizer import WordVectorizer
 from salad.utils.plot_script import plot_3d_motion
 from salad.utils.paramUtil import t2m_kinematic_chain
 
+
+def build_dict_from_txt(filename):
+    result_dict = {}
+    
+    with open(filename, 'r') as f:
+        for line in f:
+            parts = line.strip().split(" ")
+            if len(parts) >= 3:
+                key = parts[2]
+                value = parts[1].split("_")[0]
+                result_dict[key] = value
+                
+    return result_dict
 
 # padding to max length in one batch
 def collate_tensors(batch):
@@ -69,15 +83,19 @@ class SmoodiEval():
         
         # model
         self.model = Text2StylizedMotion(config["model"]).to(device)
-        # self.model.load_state_dict(
-        #     torch.load(pjoin(config["checkpoint_dir"], "latest.ckpt"), map_location=device)
-        # ) # TODO: uncomment this and load the trained weights
+        self.model.load_state_dict(
+            torch.load(pjoin(config["checkpoint_dir"], "best.ckpt"), map_location=device)
+        ) # TODO: uncomment this and load the trained weights
         self.model.eval()
         for p in self.model.parameters():
             p.requires_grad = False
 
         # style classifier
         self.classifier = StyleClassification(nclasses=47).to(device)
+        self.classifier.load_state_dict(
+            torch.load("./checkpoints/style_classifier/style_classifier.pt", map_location=device)
+            # torch.load("./checkpoints/style_classifier/style_classifier.pt"), map_location=device
+        )
         self.label_to_motion = build_dict_from_txt("./dataset/100style/100STYLE_name_dict_Filter.txt")
 
         # metrics
@@ -112,31 +130,27 @@ class SmoodiEval():
             p.requires_grad = False
 
         # dataset & dataloader
-        data_root = "./dataset/humanml3d"
-        mean = np.load("./checkpoints/t2m/Comp_v6_KLD01/meta/mean.npy")
-        std = np.load("./checkpoints/t2m/Comp_v6_KLD01/meta/std.npy")
-        w_vectorizer = WordVectorizer("./glove", "our_vab")
+        data_root = "./dataset/smoodi"
         dataset = Text2MotionTestDataset(
-            mean=mean,
-            std=std,
-            split_file="./dataset/humanml3d/test.txt",
-            w_vectorizer=w_vectorizer,
-            max_motion_length=196,
-            min_motion_length=40,
-            max_text_len=20,
-            unit_length=4,
-            motion_dir1=pjoin(data_root, "new_joint_vecs"),
-            text_dir1=pjoin(data_root, "texts"),
-            motion_dir2=pjoin(data_root, "../100style/new_joint_vecs"),
-            text_dir2=pjoin(data_root, "../100style/texts"),
+            mean = np.load(pjoin(data_root, "Mean.npy")),
+            std = np.load(pjoin(data_root, "Std.npy")),
+            mean_eval = np.load("./checkpoints/t2m/Comp_v6_KLD01/meta/mean.npy"),
+            std_eval = np.load("./checkpoints/t2m/Comp_v6_KLD01/meta/std.npy"),
+            split_file = "./dataset/smoodi/test.txt",
+            w_vectorizer = WordVectorizer("./glove", "our_vab"),
+            max_motion_length = 196,
+            min_motion_length = 40,
+            max_text_len = 20,
+            unit_length = 4,
+            text_dir = pjoin(data_root, "texts"),
+            motion_dir = pjoin(data_root, "new_joint_vecs"),
         )
         self.data_loader = DataLoader(
             dataset,
-            batch_size=32,
+            batch_size=128,
             shuffle=False,
             num_workers=4,
             pin_memory=True,
-            drop_last=True,
             collate_fn=collate_fn,
         )
 
@@ -153,37 +167,42 @@ class SmoodiEval():
         text_lengths = batch["text_len"].detach().clone().cuda()
 
         start = time.time()
-        sample = self.model.generate(motions, texts, reference_motion)[0]
+        feats_rst = self.model.generate(motions, texts, reference_motion)[0]
         end = time.time()
 
-        logits = self.classifier(sample)
-        # probs = F.softmax(logits, dim=-1)
-        # # predicted = torch.argmax(probs, dim=1)
-        # # # bsz = probs.shape[0]
+        logits = self.classifier(feats_rst)
+        probs = F.softmax(logits, dim=-1)
+        predicted = torch.argmax(probs, dim=1)
+        bsz = probs.shape[0]
 
-        # # # if bsz == 1:
-        # # #     predicted = predicted.item()
-        # # # else:
-        # # #     predicted = predicted[0].item()
-        # # # predicted = torch.tensor(predicted).cuda()
+        if bsz == 1:
+            predicted = predicted.item()
+            label_item = label.item()
+        else:
+            predicted = predicted[0].item()
+            label_item = label[0].item()
+        predicted = torch.tensor(predicted).cuda()
 
-        # # # motion_name = self.label_to_motion[str(predicted.cpu().numpy())]
-        # # # base_name = self.label_to_motion[str(label.cpu().numpy())]
-        # # # print(f"Name: {base_name} -> {motion_name}")
+        motion_name = self.label_to_motion[str(predicted.cpu().numpy())]
+        base_name = self.label_to_motion[str(label_item)]
+        tqdm.write(f"Name: {base_name} -> {motion_name}")
 
         # joints recover
-        joints_rst = self.data_loader.dataset.feats2joints(sample)
+        joints_rst = self.data_loader.dataset.feats2joints(feats_rst)
         joints_ref = self.data_loader.dataset.feats2joints(motions)
-        # plot_3d_motion("ref.mp4", t2m_kinematic_chain, joints_ref[0].cpu().numpy(), "ref")
+
+        # renorm for t2m eval
+        feats_rst = self.data_loader.dataset.renorm4t2m(feats_rst)
+        motions = self.data_loader.dataset.renorm4t2m(motions)
 
         # t2m motion encoder
         align_idx = np.argsort(lengths.data.tolist())[::-1].copy()
         motions = motions[align_idx]
-        sample = sample[align_idx]
+        feats_rst = feats_rst[align_idx]
         lengths = lengths[align_idx]
         lengths = torch.div(lengths, 4, rounding_mode="floor")
 
-        recons_mov = self.movement_enc(sample[..., :-4]).detach()
+        recons_mov = self.movement_enc(feats_rst[..., :-4]).detach()
         recons_emb = self.motion_enc(recons_mov, lengths)
         motion_mov = self.movement_enc(motions[..., :-4]).detach()
         motion_emb = self.motion_enc(motion_mov, lengths)
@@ -191,7 +210,7 @@ class SmoodiEval():
 
         return {
             "m_ref": motions,
-            "m_rst": sample,
+            "m_rst": feats_rst,
             "lat_t": text_emb,
             "lat_m": motion_emb,
             "lat_rm": recons_emb,
@@ -205,7 +224,7 @@ class SmoodiEval():
 
 
     def evaluate(self):
-        for i, batch in enumerate(self.data_loader):
+        for i, batch in enumerate(tqdm(self.data_loader, desc="Evaluating")):
             # batch = [word_embeddings, pos_one_hots, caption, sent_len, motion, m_length, tokens, caption2, sent_len2, label, style_text]
             torch.cuda.empty_cache()
             res = self.t2m_eval(batch)
@@ -219,6 +238,8 @@ class SmoodiEval():
                 res["joints_rst"],
                 res["inference_time"],
             )
+            # if i > 3:
+            #     break
 
     def compute_metrics(self):
         metrics_dict = self.metrics.compute()

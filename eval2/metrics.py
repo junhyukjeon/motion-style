@@ -438,6 +438,8 @@ class TM2TMetrics(Metric):
 
         # predicted = predicted.unsqueeze(0).unsqueeze(0)
         # label = label.unsqueeze(0).unsqueeze(0)
+        # predicted = predicted.unsqueeze(1)
+        # label = label.unsqueeze(1)
 
  
         # store all texts and motions

@@ -161,7 +161,7 @@ class Text2StylizedMotion(nn.Module):
         len_mask = lengths_to_mask(lengths)
 
         # Input
-        z = torch.randn(B, num_frames, 7, self.vae_opt.latent_dim).to(self.device, dtype=torch.float32)
+        z = torch.randn(B, num_frames // 4, 7, self.vae_opt.latent_dim).to(self.device, dtype=torch.float32)
         z = z * self.scheduler.init_noise_sigma
 
         # Set diffusion timesteps

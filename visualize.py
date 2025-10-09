@@ -64,20 +64,33 @@ def load_config():
     parser.add_argument('--config', type=str, required=True, help='Path to config file (YAML)')
     args = parser.parse_args()
 
-    config_path = args.config
-    with open(config_path, 'r') as f:
+    from pathlib import Path
+    cfg_path = Path(args.config).resolve()
+
+    with cfg_path.open('r') as f:
         config = yaml.safe_load(f)
 
-    config_basename = os.path.basename(config_path)
-    config["run_name"] = os.path.splitext(config_basename)[0]
-    config["result_dir"] = os.path.join(config["result_dir"], config["run_name"])
-    config["checkpoint_dir"] = os.path.join(config["checkpoint_dir"], config["run_name"])
+    # run_name = the path inside "configs/" without the .yaml suffix
+    # e.g., configs/loss/0.yaml  ->  run_name="loss/0"
+    parts = cfg_path.parts
+    if "configs" in parts:
+        i = parts.index("configs")
+        sub = Path(*parts[i+1:]).with_suffix("")   # loss/0 (Path)
+        run_name = str(sub).replace("\\", "/")     # normalize on Windows just in case
+    else:
+        run_name = cfg_path.stem                   # fallback
+
+    config["run_name"] = run_name
+
+    # results/loss/0  and  checkpoints/loss/0
+    config["result_dir"]     = os.path.join(config["result_dir"], run_name)
+    config["checkpoint_dir"] = os.path.join(config["checkpoint_dir"], run_name)
     return config
 
 def load_model(config, device):
     model_cfg = config['model']
     model = Text2StylizedMotion(model_cfg).to(device)
-    model.load_state_dict(torch.load(os.path.join(config["checkpoint_dir"], "best.ckpt"), map_location=device))
+    model.load_state_dict(torch.load(os.path.join(config["checkpoint_dir"], "best.ckpt"), map_location=device), strict=False)
     model.eval()
     return model
 
@@ -222,7 +235,7 @@ if __name__ == "__main__":
     idx = torch.arange(motions.shape[0], device=motions.device)
     motions = motions[idx ^ 1]
 
-    stylized, captions = model.generate(motions, captions)
+    stylized, captions = model.generate(motions, captions, 40)
     stylized = stylized * std + mean
     # idx = torch.arange(stylized.shape[0], device=stylized.device)
     reference = motions * std + mean

@@ -1,7 +1,7 @@
 # --- Run Management --- #
 run_name: auto
 result_dir: ./results
-checkpoint_dir: ./checkpoints/sc
+checkpoint_dir: ./checkpoints/t2sm
 random_seed: 42
 
 # --- Dataset --- #
@@ -12,12 +12,14 @@ dataset:
   std_path    : ./checkpoints/t2m/Comp_v6_KLD005/meta/std.npy
   style_json  : ./dataset/100style/100style_clean_clean.json
   content_json: ./dataset/100style/10content_clean_clean.json
-  window_size : 64
+  unit_length : 4
+  min_frames  : 128
+  max_frames  : 128
 
 # --- Sampler Settings --- #
 sampler:
   type: TrainSampler
-  batch_size: 32
+  batch_size: 64
   samples_per_style: 8
 
 # --- Model --- #
@@ -25,34 +27,36 @@ model:
   denoiser:
     transformer:
       layer:
-        attention:
+        attention: {}
+        film:
           lora:
             type: HyperLoRA
             rank: 8
             scale: 1.0
             style_dim: 256
             in_dim: 256
-            out_dim: 256
-            hidden_dim: 512
-        film: {}
+            out_dim: 512
+            hidden_dim: 512  
   style_encoder: 
     type: StyleTransformer
     dropout: 0.1
     style_dim: 256
-    num_layers: 2
-    num_queries: 4
+    num_layers: 4
+    num_queries: 8
     block:
       dropout: 0.1
       style_dim: 256
-      hidden_dim: 256
+      hidden_dim: 512
       num_heads: 8
   text_drop: 0.1
-  style_drop: 0.0
+  style_drop: 0.1
+  text_weight: 7.5
+  style_weight: 5.5
 
 # --- Losses --- #
 loss:
   velocity:
-    weight: 10.0
+    weight: 1.0
   supcon:
     weight: 1.0
     temperature: 0.07
@@ -63,13 +67,11 @@ early:
   min_delta: 0.0
   mode: min
 
-# --- Loss Scaler --- #
-scaler:
-  alpha: 0.01
-  norm_eps: 1e-8
-  warmup_batches: 1000
+# --- Calibration --- #
+steps: 300
+tau: 0.001
 
 # --- Training --- #
-epochs: 100
+epochs: 10000
 lr: 0.0001
-valid_size: 0.2
+valid_size: 0.9

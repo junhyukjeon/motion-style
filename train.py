@@ -29,17 +29,46 @@ def set_seed(seed=42):
         torch.cuda.manual_seed_all(seed)
 
 
+# def load_config():
+#     parser = argparse.ArgumentParser()
+#     parser.add_argument('--config', type=str, required=True, help='Path to config file (YAML)')
+#     args = parser.parse_args()
+#     config_path = args.config
+#     with open(config_path, 'r') as f:
+#         config = yaml.safe_load(f)
+#     config_basename = os.path.basename(config_path)
+#     config["run_name"] = os.path.splitext(config_basename)[0]
+#     config["result_dir"] = os.path.join(config["result_dir"], config["run_name"])
+#     config["checkpoint_dir"] = os.path.join(config["checkpoint_dir"], config["run_name"])
+#     return config
+
+
 def load_config():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, required=True, help='Path to config file (YAML)')
     args = parser.parse_args()
-    config_path = args.config
-    with open(config_path, 'r') as f:
+
+    from pathlib import Path
+    cfg_path = Path(args.config).resolve()
+
+    with cfg_path.open('r') as f:
         config = yaml.safe_load(f)
-    config_basename = os.path.basename(config_path)
-    config["run_name"] = os.path.splitext(config_basename)[0]
-    config["result_dir"] = os.path.join(config["result_dir"], config["run_name"])
-    config["checkpoint_dir"] = os.path.join(config["checkpoint_dir"], config["run_name"])
+
+    # run_name = the path inside "configs/" without the .yaml suffix
+    # e.g., configs/loss/0.yaml  ->  run_name="loss/0"
+    parts = cfg_path.parts
+    if "configs" in parts:
+        i = parts.index("configs")
+        sub = Path(*parts[i+1:]).with_suffix("")   # loss/0 (Path)
+        run_name = str(sub).replace("\\", "/")     # normalize on Windows just in case
+    else:
+        run_name = cfg_path.stem                   # fallback
+
+    config["run_name"] = run_name
+
+    # results/loss/0  and  checkpoints/loss/0
+    config["result_dir"]     = os.path.join(config["result_dir"], run_name)
+    config["checkpoint_dir"] = os.path.join(config["checkpoint_dir"], run_name)
     return config
 
 
@@ -212,22 +241,26 @@ if __name__ == "__main__":
             print(
                 f"Epoch {epoch} | "
                 f"Train scaled: {train_total_scaled:.4f} | Train norm: {train_total_norm:.4f} | Train raw: {train_total_raw:.4f} | "
-                f"Valid  scaled: {val_total_scaled:.4f}   | Valid norm: {val_total_norm:.4f}   | Valid raw: {val_total_raw:.4f} | "
+                f"Valid scaled: {val_total_scaled:.4f}   | Valid norm: {val_total_norm:.4f}   | Valid raw: {val_total_raw:.4f} | "
             )
 
-            plot_tsne(
+            plot_tsne( 
                 model, valid_loader, device, epoch, title="valid",
                 result_dir=config["result_dir"],
                 label_to_name_dict=valid_dataset.style_idx_to_style,
                 writer=writer
             )
 
+            trainable = {n for n, p in model.named_parameters() if p.requires_grad}
+            sd = model.state_dict()
+            sd_trainable = {k: v for k, v in sd.items() if k in trainable}
+
             os.makedirs(config["checkpoint_dir"], exist_ok=True)
-            torch.save(model.state_dict(), os.path.join(config["checkpoint_dir"], "latest.ckpt"))
+            torch.save(sd_trainable, os.path.join(config["checkpoint_dir"], "latest.ckpt"))
 
             if early.is_improvement(val_total_scaled):
                 print(f"✅ New best at epoch {epoch} (Val task: {val_total_scaled:.4f})")
-                torch.save(model.state_dict(), os.path.join(config["checkpoint_dir"], "best.ckpt"))
+                torch.save(sd_trainable, os.path.join(config["checkpoint_dir"], "best.ckpt"))
 
             if early.step(val_total_scaled, epoch):
                 print(f"⏹️ Early stopping at epoch {epoch} "

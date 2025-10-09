@@ -84,7 +84,7 @@ class SmoodiEval():
         # model
         self.model = Text2StylizedMotion(config["model"]).to(device)
         self.model.load_state_dict(
-            torch.load(pjoin(config["checkpoint_dir"], "best.ckpt"), map_location=device)
+            torch.load(pjoin(config["checkpoint_dir"], "best.ckpt"), map_location=device), strict=False
         ) # TODO: uncomment this and load the trained weights
         self.model.eval()
         for p in self.model.parameters():
@@ -255,16 +255,45 @@ class SmoodiEval():
         return metrics_dict
 
 
+# def load_config(config_path):
+#     with open(config_path, 'r') as f:
+#         config = yaml.safe_load(f)
 
-def load_config(config_path):
-    with open(config_path, 'r') as f:
+#     config_basename = os.path.basename(config_path)
+#     config["run_name"] = os.path.splitext(config_basename)[0]
+#     config["result_dir"] = os.path.join(config["result_dir"], config["run_name"])
+#     config["checkpoint_dir"] = os.path.join(config["checkpoint_dir"], config["run_name"])
+#     return config
+
+
+def load_config():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, required=True, help='Path to config file (YAML)')
+    args = parser.parse_args()
+
+    from pathlib import Path
+    cfg_path = Path(args.config).resolve()
+
+    with cfg_path.open('r') as f:
         config = yaml.safe_load(f)
 
-    config_basename = os.path.basename(config_path)
-    config["run_name"] = os.path.splitext(config_basename)[0]
-    config["result_dir"] = os.path.join(config["result_dir"], config["run_name"])
-    config["checkpoint_dir"] = os.path.join(config["checkpoint_dir"], config["run_name"])
+    # run_name = the path inside "configs/" without the .yaml suffix
+    # e.g., configs/loss/0.yaml  ->  run_name="loss/0"
+    parts = cfg_path.parts
+    if "configs" in parts:
+        i = parts.index("configs")
+        sub = Path(*parts[i+1:]).with_suffix("")   # loss/0 (Path)
+        run_name = str(sub).replace("\\", "/")     # normalize on Windows just in case
+    else:
+        run_name = cfg_path.stem                   # fallback
+
+    config["run_name"] = run_name
+
+    # results/loss/0  and  checkpoints/loss/0
+    config["result_dir"]     = os.path.join(config["result_dir"], run_name)
+    config["checkpoint_dir"] = os.path.join(config["checkpoint_dir"], run_name)
     return config
+
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -273,13 +302,15 @@ def set_seed(seed=42):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
+
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="./configs/")
-    args = parser.parse_args()
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument("--config", type=str, default="./configs/")
+    # args = parser.parse_args()
 
-    config = load_config(args.config)
+    # config = load_config(args.config)
+    config = load_config()
     set_seed(config["random_seed"])
     with torch.no_grad():
         evaluator = SmoodiEval(config)

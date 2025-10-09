@@ -25,10 +25,9 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 from data.dataset import TextStyleDataset
 from data.sampler import StyleSampler
-from model.networks import NETWORK_REGISTRY
 from model.t2sm import Text2StylizedMotion
 from utils.motion import recover_from_ric
-from utils.skel import Skeleton
+# from utils.skel import Skeleton
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -184,7 +183,6 @@ def plot_pair_3d_motion(
     plt.close(fig)
 
 
-
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = load_config()
@@ -213,7 +211,7 @@ if __name__ == "__main__":
     std = np.load(dataset_cfg["std_path"])
     std = torch.tensor(std, dtype=torch.float32, device=device)
 
-    target_style_idx = 0
+    target_style_idx = 15
     target_style     = dataset.style_idx_to_style[target_style_idx]
     sampler_cfg = config['sampler']
     sampler = StyleSampler(sampler_cfg, dataset, target_style=target_style_idx)

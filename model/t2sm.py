@@ -154,14 +154,14 @@ class Text2StylizedMotion(nn.Module):
         
 
     @torch.no_grad()
-    def generate(self, motion, text):
+    def generate(self, motion, text, num_frames):
         motion = motion.to(self.device)
         B, T     = motion.shape[0], motion.shape[1] // 4
         lengths  = torch.full((B,), T, device=motion.device, dtype=torch.long)
         len_mask = lengths_to_mask(lengths)
 
         # Input
-        z = torch.randn(B, T, 7, self.vae_opt.latent_dim).to(self.device, dtype=torch.float32)
+        z = torch.randn(B, num_frames, 7, self.vae_opt.latent_dim).to(self.device, dtype=torch.float32)
         z = z * self.scheduler.init_noise_sigma
 
         # Set diffusion timesteps
@@ -170,21 +170,24 @@ class Text2StylizedMotion(nn.Module):
 
         # Motion latent
         latent, _ = self.vae.encode(motion)
-        len_mask = F.pad(len_mask, (0, latent.shape[1] - len_mask.shape[1]), mode="constant", value=False)
-        latent = latent * len_mask[..., None, None].float()
+        # len_mask = F.pad(len_mask, (0, latent.shape[1] - len_mask.shape[1]), mode="constant", value=False)
+        # latent = latent * len_mask[..., None, None].float()
 
         # Style latent
         style = self.style_encoder(latent)
         idx = torch.arange(style.shape[0], device=style.device)
         # style = style[idx ^ 1]
 
-        text = ["a person is walking forward"]*B
+        # text = ["a person is walking forward"]*B
 
         # sa_weights, ta_weights, ca_weights = [], [], []
         for timestep in tqdm(timesteps, desc="Reverse diffusion"):
-            pred_uncond, _ = self.denoiser.forward(z, timestep, [""]*B, len_mask=len_mask, need_attn=False)
-            pred_text, _   = self.denoiser.forward(z, timestep, text, len_mask=len_mask, need_attn=True)
-            pred_style, _  = self.denoiser.forward(z, timestep, text, len_mask=len_mask, need_attn=True, style=style)
+            # pred_uncond, _ = self.denoiser.forward(z, timestep, [""]*B, len_mask=len_mask, need_attn=False)
+            # pred_text, _   = self.denoiser.forward(z, timestep, text, len_mask=len_mask, need_attn=True)
+            # pred_style, _  = self.denoiser.forward(z, timestep, text, len_mask=len_mask, need_attn=True, style=style)
+            pred_uncond, _ = self.denoiser.forward(z, timestep, [""]*B, need_attn=False)
+            pred_text, _   = self.denoiser.forward(z, timestep, text, need_attn=True)
+            pred_style, _  = self.denoiser.forward(z, timestep, text, need_attn=True, style=style)
             pred = pred_uncond + self.config['text_weight'] * (pred_text - pred_uncond) + self.config['style_weight'] * (pred_style - pred_uncond)
             z = self.scheduler.step(pred, timestep, z).prev_sample
             # sa_weights.append(sa)

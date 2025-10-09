@@ -251,12 +251,16 @@ if __name__ == "__main__":
                 writer=writer
             )
 
+            trainable = {n for n, p in model.named_parameters() if p.requires_grad}
+            sd = model.state_dict()
+            sd_trainable = {k: v for k, v in sd.items() if k in trainable}
+
             os.makedirs(config["checkpoint_dir"], exist_ok=True)
-            torch.save(model.state_dict(), os.path.join(config["checkpoint_dir"], "latest.ckpt"))
+            torch.save(sd_trainable, os.path.join(config["checkpoint_dir"], "latest.ckpt"))
 
             if early.is_improvement(val_total_scaled):
                 print(f"✅ New best at epoch {epoch} (Val task: {val_total_scaled:.4f})")
-                torch.save(model.state_dict(), os.path.join(config["checkpoint_dir"], "best.ckpt"))
+                torch.save(sd_trainable, os.path.join(config["checkpoint_dir"], "best.ckpt"))
 
             if early.step(val_total_scaled, epoch):
                 print(f"⏹️ Early stopping at epoch {epoch} "

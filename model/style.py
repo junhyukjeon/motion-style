@@ -60,7 +60,7 @@ class StyleTransformer(nn.Module):
         x = x.reshape(B, T * J, x.shape[-1])
         query = self.query.expand(B, -1, -1)
         for block in self.blocks:
-            query = block(query, x) 
+            query = block(query, x)
         style = query.mean(dim=1)
         style = self.head(style)
         return style

@@ -1,7 +1,7 @@
 # --- Run Management --- #
 run_name: auto
 result_dir: ./results
-checkpoint_dir: ./checkpoints/sc
+checkpoint_dir: ./checkpoints/t2sm
 random_seed: 42
 
 # --- Dataset --- #

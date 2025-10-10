@@ -50,8 +50,10 @@ class Text2MotionTestDataset(Dataset):
         min_motion_length,
         max_text_len,
         unit_length,
-        motion_dir,
-        text_dir,
+        motion_dir1,
+        text_dir1,
+        motion_dir2,
+        text_dir2,
         tiny=False,
         debug=False,
         progress_bar=True,
@@ -61,7 +63,7 @@ class Text2MotionTestDataset(Dataset):
         self.max_length = 20
         self.pointer = 0
         self.max_motion_length = max_motion_length
-        # min_motion_len = 40 if dataset_name =='t2m' else 24
+        # min_motion_len = 40 if dataset_name =="t2m" else 24
         self.min_motion_length = min_motion_length
         self.max_text_len = max_text_len
         self.unit_length = unit_length
@@ -72,12 +74,12 @@ class Text2MotionTestDataset(Dataset):
         data_dict_2 = {}
         id_list_2 = []
 
-        split_dir = os.path.dirname(split_file)
+        split_dir = pjoin(os.path.dirname(split_file), "../100style")
         split_base = os.path.basename(split_file).split(".")[0]
-        split_subfile_1 = os.path.join(split_dir,split_base + "_humanml.txt")#_humanml
-        split_subfile_2 = os.path.join(split_dir,split_base + "_100STYLE_Filter.txt")#_100STYLE_Filter
+        split_subfile_1 = pjoin(split_dir, split_base + "_humanml.txt")
+        split_subfile_2 = pjoin(split_dir, split_base + "_100STYLE_Filter.txt")
 
-        dict_path = "./dataset/smoodi/100STYLE_name_dict_Filter.txt"
+        dict_path = "./dataset/100style/100STYLE_name_dict_Filter.txt"
         motion_to_label = build_dict_from_txt(dict_path)
         motion_to_style_text = build_dict_from_txt(dict_path,is_style_text=True)
 
@@ -85,9 +87,6 @@ class Text2MotionTestDataset(Dataset):
             for line in f.readlines():
                 id_list_1.append(line.strip())
         
-        num = len(id_list_1)
-        
-        random_samples = np.random.choice(range(num), size=100, replace=False)
         id_list_1 = np.array(id_list_1)
         # Use random_samples to index id_list_1_np
         # id_list_1 = id_list_1[random_samples]
@@ -124,7 +123,7 @@ class Text2MotionTestDataset(Dataset):
         for i, name in enumerator_1:
             if count > maxdata:
                 break
-            motion = np.load(pjoin(motion_dir, name + ".npy"))
+            motion = np.load(pjoin(motion_dir1, name + ".npy"))
             if (len(motion)) < self.min_motion_length or (len(motion) >=200):
                 bad_count += 1
                 continue
@@ -132,7 +131,7 @@ class Text2MotionTestDataset(Dataset):
             flag = False
 
             # name = style_to_neutral[name]
-            text_path = pjoin(text_dir, name + ".txt")
+            text_path = pjoin(text_dir1, name + ".txt")
             assert os.path.exists(text_path)
             with cs.open(text_path) as f:
                 for line in f.readlines():
@@ -204,7 +203,7 @@ class Text2MotionTestDataset(Dataset):
         for i, name in enumerator_2:
             if count > maxdata:
                 break
-            motion = np.load(pjoin(motion_dir, name + ".npy"))
+            motion = np.load(pjoin(motion_dir2, name + ".npy"))
             label_data = motion_to_label[name]
             style_text = motion_to_style_text[name]
 
@@ -214,7 +213,7 @@ class Text2MotionTestDataset(Dataset):
             text_data_2 = []
             flag = True
 
-            text_path = pjoin(text_dir, name + ".txt")
+            text_path = pjoin(text_dir2, name + ".txt")
             assert os.path.exists(text_path)
             with cs.open(text_path) as f:
                 for line in f.readlines():
@@ -368,4 +367,14 @@ class Text2MotionTestDataset(Dataset):
         eval_std = torch.tensor(self.std_eval).to(features)
         features = features * ori_std + ori_mean
         features = (features - eval_mean) / eval_std
+        return features
+    
+    def renorm4style(self, features):
+        # renorm to style norms for using style evaluators
+        ori_mean = torch.tensor(self.mean).to(features)
+        ori_std = torch.tensor(self.std).to(features)
+        eval_mean = torch.tensor(self.mean_eval).to(features)
+        eval_std = torch.tensor(self.std_eval).to(features)
+        features = features * eval_std + eval_mean
+        features = (features - ori_mean) / ori_std
         return features

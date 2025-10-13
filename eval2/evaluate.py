@@ -278,6 +278,10 @@ class SmoodiEval():
 def load_config():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, required=True, help='Path to config file (YAML)')
+    parser.add_argument('--style_weight', type=float, default=None,
+                        help='Override config.model.style_weight at runtime')
+    parser.add_argument('--csv_name', type=str, default=None,
+                        help='CSV filename to write results to (e.g., metrics_style0.5.csv)')
     args = parser.parse_args()
 
     from pathlib import Path
@@ -286,21 +290,26 @@ def load_config():
     with cfg_path.open('r') as f:
         config = yaml.safe_load(f)
 
-    # run_name = the path inside "configs/" without the .yaml suffix
-    # e.g., configs/loss/0.yaml  ->  run_name="loss/0"
     parts = cfg_path.parts
     if "configs" in parts:
         i = parts.index("configs")
-        sub = Path(*parts[i+1:]).with_suffix("")   # loss/0 (Path)
-        run_name = str(sub).replace("\\", "/")     # normalize on Windows just in case
+        sub = Path(*parts[i+1:]).with_suffix("")
+        run_name = str(sub).replace("\\", "/")
     else:
-        run_name = cfg_path.stem                   # fallback
+        run_name = cfg_path.stem
 
     config["run_name"] = run_name
-
-    # results/loss/0  and  checkpoints/loss/0
     config["result_dir"]     = os.path.join(config["result_dir"], run_name)
     config["checkpoint_dir"] = os.path.join(config["checkpoint_dir"], run_name)
+
+    if args.style_weight is not None:
+        if "model" not in config or not isinstance(config["model"], dict):
+            config["model"] = {}
+        config["model"]["style_weight"] = args.style_weight
+
+    if args.csv_name is not None:
+        config["csv_name"] = args.csv_name  # store for use later
+
     return config
 
 
@@ -320,8 +329,33 @@ if __name__ == "__main__":
 
     # config = load_config(args.config)
     config = load_config()
+
+    import pdb; pdb.set_trace()
+
     set_seed(config["random_seed"])
     with torch.no_grad():
         evaluator = SmoodiEval(config)
         evaluator.evaluate()
-        evaluator.compute_metrics()
+        metrics = evaluator.compute_metrics()
+
+        # Write csv
+        import csv
+        row = {"run": config["run_name"]}
+        for k, v in metrics.items():
+            if isinstance(v, torch.Tensor):
+                v = v.item()
+            elif isinstance(v, np.ndarray):
+                v = float(v)
+            row[k] = v
+
+        csv_dir  = './evaluation'
+        csv_name = config.get("csv_name", "metrics.csv")
+        csv_file = os.path.join(csv_dir, csv_name)
+        os.makedirs(csv_dir, exist_ok=True)
+        exists = os.path.isfile(csv_file)
+
+        with open(csv_file, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["run"] + list(metrics.keys()))
+            if not exists:
+                writer.writeheader()
+            writer.writerow(row)

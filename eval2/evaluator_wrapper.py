@@ -415,7 +415,7 @@ class StyleClassification(nn.Module):
 
         # adding the embedding token for all sequences
 
-        xseq = torch.cat((dist, x), 0)
+        xseq = torch.cat((dist, x), 0); print(xseq.shape)
         xseq = self.query_pos(xseq)
 
         dist = self.encoder(xseq,src_key_padding_mask=~aug_mask)

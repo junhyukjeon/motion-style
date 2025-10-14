@@ -1,3 +1,5 @@
+export PYTHONPATH="$PYTHONPATH:$(pwd)/eval2:$(pwd)/salad"
+
 python eval2/evaluate.py --config configs/loss/0.yaml  --style_weight 1.0 --csv_name metrics_10.csv
 python eval2/evaluate.py --config configs/loss/1.yaml  --style_weight 1.0 --csv_name metrics_10.csv
 python eval2/evaluate.py --config configs/loss/2.yaml  --style_weight 1.0 --csv_name metrics_10.csv
@@ -34,24 +36,6 @@ python eval2/evaluate.py --config configs/split/5.yaml --style_weight 1.5 --csv_
 python eval2/evaluate.py --config configs/split/6.yaml --style_weight 1.5 --csv_name metrics_15.csv
 python eval2/evaluate.py --config configs/split/7.yaml --style_weight 1.5 --csv_name metrics_15.csv
 
-python eval2/evaluate.py --config configs/loss/0.yaml  --style_weight 2.0 --csv_name metrics_20.csv
-python eval2/evaluate.py --config configs/loss/1.yaml  --style_weight 2.0 --csv_name metrics_20.csv
-python eval2/evaluate.py --config configs/loss/2.yaml  --style_weight 2.0 --csv_name metrics_20.csv
-python eval2/evaluate.py --config configs/loss/3.yaml  --style_weight 2.0 --csv_name metrics_20.csv
-python eval2/evaluate.py --config configs/rank/0.yaml  --style_weight 2.0 --csv_name metrics_20.csv
-python eval2/evaluate.py --config configs/rank/1.yaml  --style_weight 2.0 --csv_name metrics_20.csv
-python eval2/evaluate.py --config configs/rank/2.yaml  --style_weight 2.0 --csv_name metrics_20.csv
-python eval2/evaluate.py --config configs/rank/3.yaml  --style_weight 2.0 --csv_name metrics_20.csv
-python eval2/evaluate.py --config configs/rank/4.yaml  --style_weight 2.0 --csv_name metrics_20.csv
-python eval2/evaluate.py --config configs/split/0.yaml --style_weight 2.0 --csv_name metrics_20.csv
-python eval2/evaluate.py --config configs/split/1.yaml --style_weight 2.0 --csv_name metrics_20.csv
-python eval2/evaluate.py --config configs/split/2.yaml --style_weight 2.0 --csv_name metrics_20.csv
-python eval2/evaluate.py --config configs/split/3.yaml --style_weight 2.0 --csv_name metrics_20.csv
-python eval2/evaluate.py --config configs/split/4.yaml --style_weight 2.0 --csv_name metrics_20.csv
-python eval2/evaluate.py --config configs/split/5.yaml --style_weight 2.0 --csv_name metrics_20.csv
-python eval2/evaluate.py --config configs/split/6.yaml --style_weight 2.0 --csv_name metrics_20.csv
-python eval2/evaluate.py --config configs/split/7.yaml --style_weight 2.0 --csv_name metrics_20.csv
-
 python eval2/evaluate.py --config configs/loss/0.yaml  --style_weight 2.5 --csv_name metrics_25.csv
 python eval2/evaluate.py --config configs/loss/1.yaml  --style_weight 2.5 --csv_name metrics_25.csv
 python eval2/evaluate.py --config configs/loss/2.yaml  --style_weight 2.5 --csv_name metrics_25.csv
@@ -70,20 +54,38 @@ python eval2/evaluate.py --config configs/split/5.yaml --style_weight 2.5 --csv_
 python eval2/evaluate.py --config configs/split/6.yaml --style_weight 2.5 --csv_name metrics_25.csv
 python eval2/evaluate.py --config configs/split/7.yaml --style_weight 2.5 --csv_name metrics_25.csv
 
-python eval2/evaluate.py --config configs/loss/0.yaml  --style_weight 3.0 --csv_name metrics_30.csv
-python eval2/evaluate.py --config configs/loss/1.yaml  --style_weight 3.0 --csv_name metrics_30.csv
-python eval2/evaluate.py --config configs/loss/2.yaml  --style_weight 3.0 --csv_name metrics_30.csv
-python eval2/evaluate.py --config configs/loss/3.yaml  --style_weight 3.0 --csv_name metrics_30.csv
-python eval2/evaluate.py --config configs/rank/0.yaml  --style_weight 3.0 --csv_name metrics_30.csv
-python eval2/evaluate.py --config configs/rank/1.yaml  --style_weight 3.0 --csv_name metrics_30.csv
-python eval2/evaluate.py --config configs/rank/2.yaml  --style_weight 3.0 --csv_name metrics_30.csv
-python eval2/evaluate.py --config configs/rank/3.yaml  --style_weight 3.0 --csv_name metrics_30.csv
-python eval2/evaluate.py --config configs/rank/4.yaml  --style_weight 3.0 --csv_name metrics_30.csv
-python eval2/evaluate.py --config configs/split/0.yaml --style_weight 3.0 --csv_name metrics_30.csv
-python eval2/evaluate.py --config configs/split/1.yaml --style_weight 3.0 --csv_name metrics_30.csv
-python eval2/evaluate.py --config configs/split/2.yaml --style_weight 3.0 --csv_name metrics_30.csv
-python eval2/evaluate.py --config configs/split/3.yaml --style_weight 3.0 --csv_name metrics_30.csv
-python eval2/evaluate.py --config configs/split/4.yaml --style_weight 3.0 --csv_name metrics_30.csv
-python eval2/evaluate.py --config configs/split/5.yaml --style_weight 3.0 --csv_name metrics_30.csv
-python eval2/evaluate.py --config configs/split/6.yaml --style_weight 3.0 --csv_name metrics_30.csv
-python eval2/evaluate.py --config configs/split/7.yaml --style_weight 3.0 --csv_name metrics_30.csv
+python eval2/evaluate.py --config configs/loss/0.yaml  --style_weight 3.5 --csv_name metrics_35.csv
+python eval2/evaluate.py --config configs/loss/1.yaml  --style_weight 3.5 --csv_name metrics_35.csv
+python eval2/evaluate.py --config configs/loss/2.yaml  --style_weight 3.5 --csv_name metrics_35.csv
+python eval2/evaluate.py --config configs/loss/3.yaml  --style_weight 3.5 --csv_name metrics_35.csv
+python eval2/evaluate.py --config configs/rank/0.yaml  --style_weight 3.5 --csv_name metrics_35.csv
+python eval2/evaluate.py --config configs/rank/1.yaml  --style_weight 3.5 --csv_name metrics_35.csv
+python eval2/evaluate.py --config configs/rank/2.yaml  --style_weight 3.5 --csv_name metrics_35.csv
+python eval2/evaluate.py --config configs/rank/3.yaml  --style_weight 3.5 --csv_name metrics_35.csv
+python eval2/evaluate.py --config configs/rank/4.yaml  --style_weight 3.5 --csv_name metrics_35.csv
+python eval2/evaluate.py --config configs/split/0.yaml --style_weight 3.5 --csv_name metrics_35.csv
+python eval2/evaluate.py --config configs/split/1.yaml --style_weight 3.5 --csv_name metrics_35.csv
+python eval2/evaluate.py --config configs/split/2.yaml --style_weight 3.5 --csv_name metrics_35.csv
+python eval2/evaluate.py --config configs/split/3.yaml --style_weight 3.5 --csv_name metrics_35.csv
+python eval2/evaluate.py --config configs/split/4.yaml --style_weight 3.5 --csv_name metrics_35.csv
+python eval2/evaluate.py --config configs/split/5.yaml --style_weight 3.5 --csv_name metrics_35.csv
+python eval2/evaluate.py --config configs/split/6.yaml --style_weight 3.5 --csv_name metrics_35.csv
+python eval2/evaluate.py --config configs/split/7.yaml --style_weight 3.5 --csv_name metrics_35.csv
+
+python eval2/evaluate.py --config configs/loss/0.yaml  --style_weight 4.5 --csv_name metrics_45.csv
+python eval2/evaluate.py --config configs/loss/1.yaml  --style_weight 4.5 --csv_name metrics_45.csv
+python eval2/evaluate.py --config configs/loss/2.yaml  --style_weight 4.5 --csv_name metrics_45.csv
+python eval2/evaluate.py --config configs/loss/3.yaml  --style_weight 4.5 --csv_name metrics_45.csv
+python eval2/evaluate.py --config configs/rank/0.yaml  --style_weight 4.5 --csv_name metrics_45.csv
+python eval2/evaluate.py --config configs/rank/1.yaml  --style_weight 4.5 --csv_name metrics_45.csv
+python eval2/evaluate.py --config configs/rank/2.yaml  --style_weight 4.5 --csv_name metrics_45.csv
+python eval2/evaluate.py --config configs/rank/3.yaml  --style_weight 4.5 --csv_name metrics_45.csv
+python eval2/evaluate.py --config configs/rank/4.yaml  --style_weight 4.5 --csv_name metrics_45.csv
+python eval2/evaluate.py --config configs/split/0.yaml --style_weight 4.5 --csv_name metrics_45.csv
+python eval2/evaluate.py --config configs/split/1.yaml --style_weight 4.5 --csv_name metrics_45.csv
+python eval2/evaluate.py --config configs/split/2.yaml --style_weight 4.5 --csv_name metrics_45.csv
+python eval2/evaluate.py --config configs/split/3.yaml --style_weight 4.5 --csv_name metrics_45.csv
+python eval2/evaluate.py --config configs/split/4.yaml --style_weight 4.5 --csv_name metrics_45.csv
+python eval2/evaluate.py --config configs/split/5.yaml --style_weight 4.5 --csv_name metrics_45.csv
+python eval2/evaluate.py --config configs/split/6.yaml --style_weight 4.5 --csv_name metrics_45.csv
+python eval2/evaluate.py --config configs/split/7.yaml --style_weight 4.5 --csv_name metrics_45.csv

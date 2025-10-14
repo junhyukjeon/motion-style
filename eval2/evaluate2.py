@@ -160,7 +160,7 @@ class SmoodiEval():
         self.data_loader = DataLoader(
             dataset,
             batch_size=32,
-            shuffle=False,
+            shuffle=True,
             num_workers=4,
             pin_memory=True,
             drop_last=True,
@@ -181,7 +181,7 @@ class SmoodiEval():
 
         ref_t2m = self.data_loader.dataset.renorm4t2m(reference_motion)
         start = time.time()
-        feats_rst_t2m = self.model.generate(ref_t2m, texts, motions.shape[1])[0]
+        feats_rst_t2m = self.model.generate2(ref_t2m, texts, motions.shape[1])[0]
         end = time.time()
 
         feats_rst = self.data_loader.dataset.renorm4style(feats_rst_t2m)

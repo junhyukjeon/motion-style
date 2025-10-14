@@ -26,3 +26,11 @@ t2m/
 delete/
 glove/
 save/
+evaluation/
+
+ref_m.mp4
+ref.mp4
+rst.mp4
+
+evaluate.sh
+evaluate2.sh

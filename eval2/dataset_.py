@@ -42,8 +42,6 @@ class Text2MotionTestDataset(Dataset):
         self,
         mean,
         std,
-        mean_eval,
-        std_eval,
         split_file,
         w_vectorizer,
         max_motion_length,
@@ -240,8 +238,6 @@ class Text2MotionTestDataset(Dataset):
 
         self.mean = mean
         self.std = std
-        self.mean_eval = mean_eval
-        self.std_eval = std_eval
         self.length_arr_1 = np.array(length_list_1)
         self.data_dict_1 = data_dict_1
         self.name_list = name_list_1
@@ -367,14 +363,4 @@ class Text2MotionTestDataset(Dataset):
         eval_std = torch.tensor(self.std_eval).to(features)
         features = features * ori_std + ori_mean
         features = (features - eval_mean) / eval_std
-        return features
-    
-    def renorm4style(self, features):
-        # renorm to style norms for using style evaluators
-        ori_mean = torch.tensor(self.mean).to(features)
-        ori_std = torch.tensor(self.std).to(features)
-        eval_mean = torch.tensor(self.mean_eval).to(features)
-        eval_std = torch.tensor(self.std_eval).to(features)
-        features = features * eval_std + eval_mean
-        features = (features - ori_mean) / ori_std
         return features

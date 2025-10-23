@@ -16,7 +16,7 @@ from eval2.metrics import TM2TMetrics
 from eval2.evaluator_wrapper import StyleClassification
 
 from utils.motion import recover_from_ric
-from model.t2sm import Text2StylizedMotion
+from model.t2sm_mix import Text2StylizedMotion
 
 from salad.models.t2m_eval_wrapper import build_evaluators
 from salad.utils.word_vectorizer import WordVectorizer
@@ -73,6 +73,7 @@ def collate_fn(batch):
         "style_text": [b[11] for b in notnone_batches],
         "label": [torch.tensor(int(b[10])) for b in notnone_batches],
         "text_len2":collate_tensors([torch.tensor(b[9]) for b in notnone_batches]),
+        "length2": [b[9] for b in notnone_batches],
     }
     return adapted_batch
 
@@ -84,7 +85,7 @@ class SmoodiEval():
         # model
         self.model = Text2StylizedMotion(config["model"]).to(device)
         self.model.load_state_dict(
-            torch.load(pjoin(config["checkpoint_dir"], "best.ckpt"), map_location=device), strict=False
+            torch.load(pjoin(config["checkpoint_dir"], "latest.ckpt"), map_location=device, weights_only=True), strict=False
         )
         self.model.eval()
         for p in self.model.parameters():
@@ -93,7 +94,7 @@ class SmoodiEval():
         # style classifier
         self.classifier = StyleClassification(nclasses=47).to(device)
         self.classifier.load_state_dict(
-            torch.load("./checkpoints/style_classifier/style_classifier.pt", map_location=device)
+            torch.load("./checkpoints/style_classifier/style_classifier.pt", map_location=device, weights_only=True)
         )
         self.label_to_motion = build_dict_from_txt("./dataset/100style/100STYLE_name_dict_Filter.txt")
 
@@ -171,6 +172,7 @@ class SmoodiEval():
         lengths = torch.tensor(batch["length"]).detach().clone().cuda()
         
         reference_motion = batch["reference_motion"].detach().clone().cuda()
+        lengths2 = torch.tensor(batch["length2"]).detach().clone().cuda()
         label = torch.tensor(batch["label"]).detach().clone().cuda()
 
         word_embs = batch["word_embs"].detach().clone().cuda()
@@ -179,7 +181,7 @@ class SmoodiEval():
 
         ref_t2m = self.data_loader.dataset.renorm4t2m(reference_motion)
         start = time.time()
-        feats_rst_t2m = self.model.generate(ref_t2m, texts, lengths)[0]
+        feats_rst_t2m = self.model.generate(ref_t2m, texts, lengths, lengths2)[0]
         end = time.time()
 
         feats_rst = self.data_loader.dataset.renorm4style(feats_rst_t2m)
@@ -195,10 +197,11 @@ class SmoodiEval():
         # joints recover
         joints_rst = self.data_loader.dataset.feats2joints(feats_rst)
         joints_ref = self.data_loader.dataset.feats2joints(motions)
-        # joints_ref_m = self.data_loader.dataset.feats2joints(reference_motion)
+        joints_ref_m = self.data_loader.dataset.feats2joints(reference_motion)
         # plot_3d_motion("rst.mp4", t2m_kinematic_chain, joints_rst[0].cpu().numpy(), "rst", fps=20)
         # plot_3d_motion("ref.mp4", t2m_kinematic_chain, joints_ref[0].cpu().numpy(), "ref", fps=20)
         # plot_3d_motion("ref_m.mp4", t2m_kinematic_chain, joints_ref_m[0].cpu().numpy(), "ref_m", fps=20)
+        # breakpoint()
 
         # renorm for t2m eval
         feats_rst = self.data_loader.dataset.renorm4t2m(feats_rst)
@@ -247,12 +250,13 @@ class SmoodiEval():
                 res["joints_rst"],
                 res["inference_time"],
             )
-            if i > 3:
-                break
+            if i % 10 == 0 and i > 0:
+                print(f"Batch {i}:")
+                self.compute_metrics()
 
     def compute_metrics(self):
         metrics_dict = self.metrics.compute()
-        self.metrics.reset()
+        # self.metrics.reset()
         print(metrics_dict)
         for k, v in metrics_dict.items():
             if isinstance(v, float):

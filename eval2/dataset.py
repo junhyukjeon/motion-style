@@ -68,6 +68,11 @@ class Text2MotionTestDataset(Dataset):
         self.max_text_len = max_text_len
         self.unit_length = unit_length
 
+        self.mean = mean
+        self.std = std
+        self.mean_eval = mean_eval
+        self.std_eval = std_eval
+
         data_dict_1 = {}
         id_list_1 = []
 
@@ -203,11 +208,14 @@ class Text2MotionTestDataset(Dataset):
         for i, name in enumerator_2:
             if count > maxdata:
                 break
-            motion = np.load(pjoin(motion_dir2, name + ".npy"))
+            motion = np.load(pjoin(motion_dir2, name + ".npy"))[1:]
             label_data = motion_to_label[name]
             style_text = motion_to_style_text[name]
 
             if (len(motion)) < self.min_motion_length or (len(motion) >=200):
+                bad_count += 1
+                continue
+            if np.max(np.abs((motion - self.mean_eval) / self.std_eval)) > 1e3: # filter outliers
                 bad_count += 1
                 continue
             text_data_2 = []
@@ -238,10 +246,7 @@ class Text2MotionTestDataset(Dataset):
         name_list_2, length_list_2 = zip(
             *sorted(zip(new_name_list_2, length_list_2), key=lambda x: x[1]))
 
-        self.mean = mean
-        self.std = std
-        self.mean_eval = mean_eval
-        self.std_eval = std_eval
+        
         self.length_arr_1 = np.array(length_list_1)
         self.data_dict_1 = data_dict_1
         self.name_list = name_list_1

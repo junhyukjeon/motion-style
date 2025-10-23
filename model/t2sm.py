@@ -154,14 +154,14 @@ class Text2StylizedMotion(nn.Module):
         
 
     @torch.no_grad()
-    def generate(self, motion, text, num_frames):
+    def generate(self, motion, text, lengths):
         motion = motion.to(self.device)
         B, T     = motion.shape[0], motion.shape[1] // 4
-        lengths  = torch.full((B,), T, device=motion.device, dtype=torch.long)
-        len_mask = lengths_to_mask(lengths)
+        # lengths  = torch.full((B,), T, device=motion.device, dtype=torch.long)
+        len_mask = lengths_to_mask(lengths // 4)
 
         # Input
-        z = torch.randn(B, num_frames // 4, 7, self.vae_opt.latent_dim).to(self.device, dtype=torch.float32)
+        z = torch.randn(B, lengths.max() // 4, 7, self.vae_opt.latent_dim).to(self.device, dtype=torch.float32)
         z = z * self.scheduler.init_noise_sigma
 
         # Set diffusion timesteps
@@ -185,14 +185,16 @@ class Text2StylizedMotion(nn.Module):
             # pred_uncond, _ = self.denoiser.forward(z, timestep, [""]*B, len_mask=len_mask, need_attn=False)
             # pred_text, _   = self.denoiser.forward(z, timestep, text, len_mask=len_mask, need_attn=True)
             # pred_style, _  = self.denoiser.forward(z, timestep, text, len_mask=len_mask, need_attn=True, style=style)
-            pred_uncond, _ = self.denoiser.forward(z, timestep, [""]*B, need_attn=False)
-            pred_text, _   = self.denoiser.forward(z, timestep, text, need_attn=True)
-            pred_style, _  = self.denoiser.forward(z, timestep, text, need_attn=True, style=style)
-            pred = pred_uncond + self.config['text_weight'] * (pred_text - pred_uncond) + self.config['style_weight'] * (pred_style - pred_uncond)
+            pred_uncond, _ = self.denoiser.forward(z, timestep, [""]*B, len_mask, need_attn=False)
+            pred_text, _   = self.denoiser.forward(z, timestep, text, len_mask, need_attn=False)
+            pred_style, _  = self.denoiser.forward(z, timestep, text, len_mask, need_attn=False, style=style)
+            pred = pred_uncond + self.config['text_weight'] * (pred_text - pred_uncond) + self.config['style_weight'] * (pred_style - pred_text)
             z = self.scheduler.step(pred, timestep, z).prev_sample
             # sa_weights.append(sa)
             # ta_weights.append(ta)
             # ca_weights.append(ca)
 
         stylized_motion = self.vae.decode(z)
+        len_mask = lengths_to_mask(lengths)
+        stylized_motion = stylized_motion * len_mask[..., None].float()
         return stylized_motion, text

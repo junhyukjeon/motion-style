@@ -16,6 +16,9 @@ def loss_supcon(config, model, out):
     style       = out['style']
     style_idx   = out['style_idx']
 
+    if style.dim() == 4:
+        style = style.mean(dim=(1, 2))
+
     # Normalize so magnitude of z is not penalized
     style = F.normalize(style, dim=1)
 

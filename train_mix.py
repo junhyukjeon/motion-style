@@ -9,16 +9,16 @@ import torch.nn.functional as F
 import yaml
 from collections import defaultdict
 from sklearn.model_selection import train_test_split
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from data.dataset import TextStyleDataset
+from data.mix_dataset import MixedTextStyleDataset
 from data.sampler import SAMPLER_REGISTRY
-from model.t2sm import Text2StylizedMotion
+from model.t2sm_mix import Text2StylizedMotion
 from utils.train.early_stopper import EarlyStopper
-from utils.train.loss import LOSS_REGISTRY
-from utils.plot import plot_tsne
+from utils.train.loss_mix import LOSS_REGISTRY
+from utils.plot import plot_tsne_mix
 
 
 def set_seed(seed=42):
@@ -27,6 +27,20 @@ def set_seed(seed=42):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+# def load_config():
+#     parser = argparse.ArgumentParser()
+#     parser.add_argument('--config', type=str, required=True, help='Path to config file (YAML)')
+#     args = parser.parse_args()
+#     config_path = args.config
+#     with open(config_path, 'r') as f:
+#         config = yaml.safe_load(f)
+#     config_basename = os.path.basename(config_path)
+#     config["run_name"] = os.path.splitext(config_basename)[0]
+#     config["result_dir"] = os.path.join(config["result_dir"], config["run_name"])
+#     config["checkpoint_dir"] = os.path.join(config["checkpoint_dir"], config["run_name"])
+#     return config
 
 
 def load_config():
@@ -72,21 +86,24 @@ if __name__ == "__main__":
     with open(config["dataset"]["style_json"]) as f:
         styles_to_ids = json.load(f)
     styles_sorted = sorted(styles_to_ids.keys())
-    train_styles, valid_styles = train_test_split(styles_sorted, test_size=config['valid_size'], random_state=config["random_seed"])
+    if config['valid_size'] == 0.0:
+        train_styles, valid_styles = styles_sorted, []
+    else:
+        train_styles, valid_styles = train_test_split(styles_sorted, test_size=config['valid_size'], random_state=config["random_seed"])
 
     # --- Dataset & Loader --- #
     dataset_cfg = config['dataset']
-    # train_dataset = TextStyleDataset(dataset_cfg, styles_sorted)
-    # valid_dataset = TextStyleDataset(dataset_cfg, styles_sorted)
-    train_dataset = TextStyleDataset(dataset_cfg, train_styles)
-    valid_dataset = TextStyleDataset(dataset_cfg, valid_styles)
+    train_dataset = MixedTextStyleDataset(dataset_cfg, train_styles)
+    valid_dataset = MixedTextStyleDataset(dataset_cfg, valid_styles)
 
-    sampler_cfg = config['sampler']
-    train_sampler = SAMPLER_REGISTRY[sampler_cfg['type']](sampler_cfg, train_dataset)
-    valid_sampler = SAMPLER_REGISTRY[sampler_cfg['type']](sampler_cfg, valid_dataset)
+    # sampler_cfg = config['sampler']
+    # train_sampler = SAMPLER_REGISTRY[sampler_cfg['type']](sampler_cfg, train_dataset)
+    # valid_sampler = SAMPLER_REGISTRY[sampler_cfg['type']](sampler_cfg, valid_dataset)
     
-    train_loader  = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=8)
-    valid_loader = DataLoader(valid_dataset, batch_sampler=valid_sampler, num_workers=8)
+    train_loader  = DataLoader(train_dataset, batch_size=dataset_cfg["batch_size"], num_workers=8, shuffle=True, pin_memory=True)
+    valid_loader = DataLoader(valid_dataset, batch_size=dataset_cfg["batch_size"], num_workers=8, shuffle=True, pin_memory=True)
+
+    # import pdb; pdb.set_trace()
     
     # --- Model --- #
     model_cfg = config['model']
@@ -97,47 +114,51 @@ if __name__ == "__main__":
     )
 
     # --- Losses & Scaler --- #
-    loss_cfg = config['loss']
-    loss_fns = {name: LOSS_REGISTRY[name] for name in loss_cfg}
+    loss_cfg     = config['loss']
+    loss_fns     = {name: LOSS_REGISTRY[name] for name in loss_cfg}
 
     # --- Early Stopper --- #
     early_cfg = config['early']
     early = EarlyStopper(early_cfg)
 
     # --- Calibration --- #
-    scales = {}
-    sum_sq = defaultdict(float)
+    scales  = {}
+    sum_sq  = defaultdict(float)
     model.train()
-    pbar = tqdm(zip(range(config['steps']), train_loader), total=config['steps'])
+    pbar = tqdm(zip(range(config['steps']), train_loader), total=min(config['steps'], len(train_loader)), desc="[Calibrating]")
     n = 0
-    for _, batch in pbar:
-        out = model(batch)
-        losses = {}
-        for name, fn in loss_fns.items():
-            spec = loss_cfg[name]
-            raw  = fn(spec, model, out)
-            losses[name] = raw
+    # for _, batch in pbar:
+    #     out = model(batch)
+    #     losses = {}
+    #     for name, fn in loss_fns.items():
+    #         spec = loss_cfg[name]
+    #         raw  = fn(spec, model, out)
+    #         losses[name] = raw
 
-        for name, val in losses.items():
-            sum_sq[name] += float(val.detach()) ** 2
+    #         # =================== DEBUGGING ===================
+    #         # if raw.isnan().any() or raw.isinf().any() or (raw > 1e5).any():
+    #         #     breakpoint()
+    #         # =================================================
 
-        total_loss = None
-        for name, val in losses.items():
-            scaled     = loss_cfg[name]['weight'] * val
-            total_loss = scaled if total_loss is None else total_loss + scaled
+    #     for name, val in losses.items():
+    #         sum_sq[name] += float(val.detach()) ** 2
 
-        optimizer.zero_grad(set_to_none=True)
-        total_loss.backward()
-        optimizer.step()
+    #     total_loss = None
+    #     for name, val in losses.items():
+    #         scaled     = loss_cfg[name]['weight'] * val
+    #         total_loss = scaled if total_loss is None else total_loss + scaled
 
-        pbar.set_postfix(loss=float(total_loss.item()))
-        n += 1
+    #     optimizer.zero_grad()
+    #     total_loss.backward()
+    #     optimizer.step()
 
-    for name, s2 in sum_sq.items():
-        rms = (s2 / max(1, n)) ** 0.5
-        scales[name] = max(rms, config['tau'])
+    #     pbar.set_postfix(loss=float(total_loss.item()))
+    #     n += 1
 
-    print("📏 Frozen RMS denominators:", {k: round(v, 6) for k, v in scales.items()})
+    # for name, s2 in sum_sq.items():
+    #     rms = (s2 / max(1, n)) ** 0.5
+    #     scales[name] = max(rms, config['tau'])
+    # print("📏 Frozen RMS denominators:", {k: round(v, 6) for k, v in scales.items()})
 
     # --- Training --- #
     best_val_loss = float('inf')
@@ -230,7 +251,7 @@ if __name__ == "__main__":
                 f"Valid scaled: {val_total_scaled:.4f}   | Valid norm: {val_total_norm:.4f}   | Valid raw: {val_total_raw:.4f} | "
             )
 
-            plot_tsne( 
+            plot_tsne_mix( 
                 model, valid_loader, device, epoch, title="valid",
                 result_dir=config["result_dir"],
                 label_to_name_dict=valid_dataset.style_idx_to_style,
@@ -244,11 +265,14 @@ if __name__ == "__main__":
             os.makedirs(config["checkpoint_dir"], exist_ok=True)
             torch.save(sd_trainable, os.path.join(config["checkpoint_dir"], "latest.ckpt"))
 
+            if epoch % 10 == 0:
+                torch.save(sd_trainable, os.path.join(config["checkpoint_dir"], f"epoch{epoch:03d}.ckpt"))
+
             if early.is_improvement(val_total_scaled):
                 print(f"✅ New best at epoch {epoch} (Val task: {val_total_scaled:.4f})")
                 torch.save(sd_trainable, os.path.join(config["checkpoint_dir"], "best.ckpt"))
 
-            if early.step(val_total_scaled, epoch):
-                print(f"⏹️ Early stopping at epoch {epoch} "
-                    f"(best task={early.best:.4f} at epoch {early.best_epoch})")
-                break
+            # if early.step(val_total_scaled, epoch):
+            #     print(f"⏹️ Early stopping at epoch {epoch} "
+            #         f"(best task={early.best:.4f} at epoch {early.best_epoch})")
+            #     break

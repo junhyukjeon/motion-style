@@ -18,6 +18,9 @@ def plot_tsne(model, loader, device, epoch=None, title="valid", result_dir="", l
     with torch.no_grad():
         for batch in loader:
             style, style_idx = model.style(batch)
+            if style.dim() == 4:
+                style = style.mean(dim=(1, 2))
+
             # style = style.cpu()
             # style_idx = style_idx.cpu()
 
@@ -65,7 +68,7 @@ def plot_tsne(model, loader, device, epoch=None, title="valid", result_dir="", l
             else:
                 style_colors[label] = cmap(i % cmap.N)
 
-    # === Plot
+    # === Plot 
     fig = plt.figure(figsize=(8, 6))
     ax = fig.add_subplot(111, projection='3d')
 

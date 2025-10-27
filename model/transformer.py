@@ -42,7 +42,7 @@ class DenseFiLM(nn.Module):
 
 
 class MultiheadAttention(nn.Module):
-    def __init__(self, config, d_model, n_heads, dropout, batch_first=True):
+    def __init__(self, config, d_model, n_heads, dropout, batch_first=True, use_lora=False):
         super(MultiheadAttention, self).__init__()
         self.Wq = nn.Linear(d_model, d_model)
         self.Wk = nn.Linear(d_model, d_model)
@@ -53,14 +53,13 @@ class MultiheadAttention(nn.Module):
         self.batch_first = batch_first
         self.dropout = nn.Dropout(dropout)
 
-        self.use_lora = False
-        if "lora" in config:
+        self.use_lora = use_lora
+        if self.use_lora and ("lora" in config):
             lora_cfg = config["lora"]
             self.q_lora = LORA_REGISTRY[lora_cfg['type']](lora_cfg)
-            self.k_lora = LORA_REGISTRY[lora_cfg['type']](lora_cfg)
-            self.v_lora = LORA_REGISTRY[lora_cfg['type']](lora_cfg)
+            # self.k_lora = LORA_REGISTRY[lora_cfg['type']](lora_cfg)
+            # self.v_lora = LORA_REGISTRY[lora_cfg['type']](lora_cfg)
             self.o_lora = LORA_REGISTRY[lora_cfg['type']](lora_cfg)
-            self.use_lora = True
 
     def forward(self, query, key, value, key_padding_mask=None, need_weights=True, average_attn_weights=False, style=None):
         """
@@ -82,9 +81,12 @@ class MultiheadAttention(nn.Module):
 
         # LoRA
         if self.use_lora and style is not None:
-            q = q + self.q_lora(q_in, style)
-            k = k + self.k_lora(k_in, style)
-            v = v + self.v_lora(v_in, style)
+            Aq, Bq = self.q_lora(style)
+            tmp = torch.einsum('btd,brd->btr', q_in, Aq)
+            dq  = self.q_lora.scale * torch.einsum('bdr,btr->btd', Bq, tmp)
+            q = q + dq
+            # k = k + self.k_lora(k_in, style)
+            # v = v + self.v_lora(v_in, style)
 
         # Heads
         q = q.view(B, T1, self.n_heads, self.head_dim).transpose(1, 2)
@@ -105,7 +107,10 @@ class MultiheadAttention(nn.Module):
         # Output projection (+ optional O-LoRA; uses post-attn features as input)
         out = self.Wo(attn_output)
         if self.use_lora and style is not None:
-            out = out + self.o_lora(attn_output, style)
+            Ao, Bo = self.o_lora(style)
+            tmp = torch.einsum('btd,brd->btr', attn_output, Ao)
+            do  = self.o_lora.scale * torch.einsum('bdr,btr->btd', Bo, tmp)
+            out = out + do
 
         if need_weights:
             if average_attn_weights:
@@ -124,12 +129,12 @@ class MultiheadAttention(nn.Module):
         # Linear transformation
         v_in = value
         v = self.Wv(v_in)
-        if self.use_lora and style is not None:
-            v = v + self.v_lora(v_in, style)
-        v = v.view(B, T2, self.n_heads, self.head_dim).transpose(1, 2)  # [B,H,T2,dh]
+        # if self.use_lora and style is not None:
+        #     v = v + self.v_lora(v_in, style)
+        v = v.view(B, T2, self.n_heads, self.head_dim).transpose(1, 2) # [B,H,T2,dh]
 
         # Apply precomputed attention
-        attn_output = torch.matmul(attn_weights, v)                       # [B,H,T1,dh]
+        attn_output = torch.matmul(attn_weights, v)                    # [B,H,T1,dh]
         attn_output = attn_output.transpose(1, 2).contiguous().view(B, -1, D)
 
         # Output projection (+ optional O-LoRA; uses post-attn features as input)
@@ -160,7 +165,7 @@ class STTransformerLayer(nn.Module):
         self.temp_dropout = nn.Dropout(opt.dropout)
 
         # cross attention
-        self.cross_attn = MultiheadAttention(config["attention"], opt.latent_dim, opt.n_heads, opt.dropout, batch_first=True)
+        self.cross_attn = MultiheadAttention(config["attention"], opt.latent_dim, opt.n_heads, opt.dropout, batch_first=True, use_lora=True)
         self.cross_src_norm = nn.LayerNorm(opt.latent_dim)
         self.cross_tgt_norm = nn.LayerNorm(opt.latent_dim)
         self.cross_dropout = nn.Dropout(opt.dropout)
@@ -232,8 +237,8 @@ class STTransformerLayer(nn.Module):
         x_t = x.transpose(1, 2).reshape(B * J, T, D)
         # x_mask_t = None if x_mask is None else x_mask.repeat_interleave(J, dim=0)
         style_t = None
-        if style is not None:
-            style_t = style.unsqueeze(1).expand(B, J, S).reshape(B * J, S)
+        # if style is not None:
+        #     style_t = style.unsqueeze(1).expand(B, J, S).reshape(B * J, S)
         # temp_fixed = None if temp_attn is None else temp_attn.repeat_interleave(J, dim=0)
         ta_out, ta_weight = self._ta_block(x_t, style=style_t, mask=x_mask, fixed_attn=temp_attn)
         ta_out = ta_out.reshape(B, J, T, D).transpose(1, 2)
@@ -243,8 +248,8 @@ class STTransformerLayer(nn.Module):
         # Skeletal attention
         x_s = x.reshape(B * T, J, D)
         style_s = None
-        if style is not None:
-            style_s = style.unsqueeze(1).expand(B, T, S).reshape(B * T, S)
+        # if style is not None:
+        #     style_s = style.unsqueeze(1).expand(B, T, S).reshape(B * T, S)
         # skel_fixed = None if skel_attn is None else skel_attn.repeat_interleave(T, dim=0)
         sa_out, sa_weight = self._sa_block(x_s, style=style_s, fixed_attn=skel_attn)
         sa_out = sa_out.reshape(B, T, J, D)

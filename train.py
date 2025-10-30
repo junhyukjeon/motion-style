@@ -14,6 +14,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from data.dataset import TextStyleDataset
+from data.mix_dataset import MixedTextStyleDataset
 from data.sampler import SAMPLER_REGISTRY
 from model.t2sm import Text2StylizedMotion
 from utils.train.early_stopper import EarlyStopper

@@ -60,6 +60,8 @@ class MultiheadAttention(nn.Module):
             # self.k_lora = LORA_REGISTRY[lora_cfg['type']](lora_cfg)
             # self.v_lora = LORA_REGISTRY[lora_cfg['type']](lora_cfg)
             self.o_lora = LORA_REGISTRY[lora_cfg['type']](lora_cfg)
+        else:
+            self.use_lora = False
 
     def forward(self, query, key, value, key_padding_mask=None, need_weights=True, average_attn_weights=False, style=None):
         """

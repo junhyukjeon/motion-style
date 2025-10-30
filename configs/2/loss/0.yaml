@@ -60,7 +60,7 @@ model:
 
 # --- Losses --- #
 loss:
-  velocity:
+  velocity: 
     weight: 1.0
   supcon:
     weight: 1.0

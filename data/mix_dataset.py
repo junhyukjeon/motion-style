@@ -119,7 +119,7 @@ class MixedTextStyleDataset(data.Dataset):
             flag = True
 
             # name = style_to_neutral[name]
-            text_path = pjoin(text_dir, name + ".txt")
+            text_path = pjoin(text_dir, name + ".txt")#; import pdb; pdb.set_trace()
             assert os.path.exists(text_path)
             with cs.open(text_path) as f:
                 for line in f.readlines():

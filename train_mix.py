@@ -54,15 +54,13 @@ def load_config():
     with cfg_path.open('r') as f:
         config = yaml.safe_load(f)
 
-    # run_name = the path inside "configs/" without the .yaml suffix
-    # e.g., configs/loss/0.yaml  ->  run_name="loss/0"
     parts = cfg_path.parts
     if "configs" in parts:
         i = parts.index("configs")
-        sub = Path(*parts[i+1:]).with_suffix("")   # loss/0 (Path)
-        run_name = str(sub).replace("\\", "/")     # normalize on Windows just in case
+        sub = Path(*parts[i+1:]).with_suffix("")
+        run_name = str(sub).replace("\\", "/")
     else:
-        run_name = cfg_path.stem                   # fallback
+        run_name = cfg_path.stem
 
     config["run_name"] = run_name
 
@@ -102,8 +100,6 @@ if __name__ == "__main__":
     
     train_loader  = DataLoader(train_dataset, batch_size=dataset_cfg["batch_size"], num_workers=8, shuffle=True, pin_memory=True)
     valid_loader = DataLoader(valid_dataset, batch_size=dataset_cfg["batch_size"], num_workers=8, shuffle=True, pin_memory=True)
-
-    # import pdb; pdb.set_trace()
     
     # --- Model --- #
     model_cfg = config['model']
@@ -127,38 +123,38 @@ if __name__ == "__main__":
     model.train()
     pbar = tqdm(zip(range(config['steps']), train_loader), total=min(config['steps'], len(train_loader)), desc="[Calibrating]")
     n = 0
-    # for _, batch in pbar:
-    #     out = model(batch)
-    #     losses = {}
-    #     for name, fn in loss_fns.items():
-    #         spec = loss_cfg[name]
-    #         raw  = fn(spec, model, out)
-    #         losses[name] = raw
+    for _, batch in pbar:
+        out = model(batch)
+        losses = {}
+        for name, fn in loss_fns.items():
+            spec = loss_cfg[name]
+            raw  = fn(spec, model, out)
+            losses[name] = raw
 
-    #         # =================== DEBUGGING ===================
-    #         # if raw.isnan().any() or raw.isinf().any() or (raw > 1e5).any():
-    #         #     breakpoint()
-    #         # =================================================
+            # =================== DEBUGGING ===================
+            # if raw.isnan().any() or raw.isinf().any() or (raw > 1e5).any():
+            #     breakpoint()
+            # =================================================
 
-    #     for name, val in losses.items():
-    #         sum_sq[name] += float(val.detach()) ** 2
+        for name, val in losses.items():
+            sum_sq[name] += float(val.detach()) ** 2
 
-    #     total_loss = None
-    #     for name, val in losses.items():
-    #         scaled     = loss_cfg[name]['weight'] * val
-    #         total_loss = scaled if total_loss is None else total_loss + scaled
+        total_loss = None
+        for name, val in losses.items():
+            scaled     = loss_cfg[name]['weight'] * val
+            total_loss = scaled if total_loss is None else total_loss + scaled
 
-    #     optimizer.zero_grad()
-    #     total_loss.backward()
-    #     optimizer.step()
+        optimizer.zero_grad()
+        total_loss.backward()
+        optimizer.step()
 
-    #     pbar.set_postfix(loss=float(total_loss.item()))
-    #     n += 1
+        pbar.set_postfix(loss=float(total_loss.item()))
+        n += 1
 
-    # for name, s2 in sum_sq.items():
-    #     rms = (s2 / max(1, n)) ** 0.5
-    #     scales[name] = max(rms, config['tau'])
-    # print("📏 Frozen RMS denominators:", {k: round(v, 6) for k, v in scales.items()})
+    for name, s2 in sum_sq.items():
+        rms = (s2 / max(1, n)) ** 0.5
+        scales[name] = max(rms, config['tau'])
+    print("📏 Frozen RMS denominators:", {k: round(v, 6) for k, v in scales.items()})
 
     # --- Training --- #
     best_val_loss = float('inf')
@@ -272,7 +268,7 @@ if __name__ == "__main__":
                 print(f"✅ New best at epoch {epoch} (Val task: {val_total_scaled:.4f})")
                 torch.save(sd_trainable, os.path.join(config["checkpoint_dir"], "best.ckpt"))
 
-            # if early.step(val_total_scaled, epoch):
-            #     print(f"⏹️ Early stopping at epoch {epoch} "
-            #         f"(best task={early.best:.4f} at epoch {early.best_epoch})")
-            #     break
+            if early.step(val_total_scaled, epoch):
+                print(f"⏹️ Early stopping at epoch {epoch} "
+                    f"(best task={early.best:.4f} at epoch {early.best_epoch})")
+                break

@@ -101,28 +101,29 @@ class StyleLoRA(nn.Module):
             nn.GELU(),
             nn.Linear(self.style_dim, self.out_dim * self.rank),
         )
-        # Zero-init last layers so ΔW starts near zero
-        nn.init.zeros_(self.head_A[-1].weight); nn.init.zeros_(self.head_A[-1].bias)
-        nn.init.zeros_(self.head_B[-1].weight); nn.init.zeros_(self.head_B[-1].bias)
+        nn.init.kaiming_uniform_(self.head_A[-1].weight, a=math.sqrt(5))
+        nn.init.zeros_(self.head_A[-1].bias)
+        nn.init.zeros_(self.head_B[-1].weight)
+        nn.init.zeros_(self.head_B[-1].bias)
 
     def forward(self, style):
         B, T, J, _ = style.shape
         x = self.project(style)
-        x = x.reshape(B, T * J, x.shape[-1]) # (B, N, D)
+        x = x.reshape(B, T * J, x.shape[-1])
 
         # Expand learnable queries per batch
-        qA = self.qA.expand(B, -1, -1) # (B, 1, D)
-        qB = self.qB.expand(B, -1, -1) # (B, 1, D)
+        qA = self.qA.expand(B, -1, -1)
+        qB = self.qB.expand(B, -1, -1)
 
         # Cross-attention stacks
         for block in self.blocks:
-            qA = block(qA, x) # (B, 1, D)
-            qB = block(qB, x) # (B, 1, D)
+            qA = block(qA, x)
+            qB = block(qB, x)
 
         # Map to LoRA factors
-        hA = qA.squeeze(1) # (B, D)
-        hB = qB.squeeze(1) # (B, D)
-        A  = self.head_A(hA).view(B, self.rank, self.in_dim) #  (B, R, D)
+        hA = qA.squeeze(1)
+        hB = qB.squeeze(1)
+        A  = self.head_A(hA).view(B, self.rank, self.in_dim)  # (B, R, D)
         Bm = self.head_B(hB).view(B, self.out_dim, self.rank) # (B, D, R)
         return A, Bm
 

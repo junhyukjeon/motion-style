@@ -18,7 +18,7 @@ dataset:
   # motion_dir  : ./dataset/100style/new_joint_vecs
   # text_dir    : ./dataset/100style/texts
   style_json  : ./dataset/100style/100style_clean_clean.json
-  batch_size  : 64
+  batch_size  : 32
   # content_json: ./dataset/100style/10content_clean_clean.json
   # min_frames  : 128
   # max_frames  : 128

@@ -9,12 +9,12 @@ import torch.nn.functional as F
 import yaml
 from collections import defaultdict
 from sklearn.model_selection import train_test_split
+from torch.cuda.amp import autocast
 from torch.utils.data import DataLoader, Subset
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from data.dataset import TextStyleDataset
-from data.mix_dataset import MixedTextStyleDataset
+from data.dataset import Dataset100Style, DatasetHumanML3D
 from data.sampler import SAMPLER_REGISTRY
 from model.t2sm import Text2StylizedMotion
 from utils.train.early_stopper import EarlyStopper
@@ -70,25 +70,36 @@ if __name__ == "__main__":
     writer = SummaryWriter(log_dir=os.path.join("./results/tensorboard", config["run_name"]))
 
     # --- Style Split --- #
-    with open(config["dataset"]["style_json"]) as f:
+    style_cfg = config['dataset_style']
+    with open(style_cfg["style_json"]) as f:
         styles_to_ids = json.load(f)
-    styles_sorted = sorted(styles_to_ids.keys())
-    train_styles, valid_styles = train_test_split(styles_sorted, test_size=config['valid_size'], random_state=config["random_seed"])
+    all_styles = sorted(styles_to_ids.keys())
+    # train_styles, valid_styles = train_test_split(styles_sorted, test_size=config['valid_size'], random_state=config["random_seed"])
+
+    def read_ids(p):
+        with open(p, "r", encoding="utf-8") as f:
+            return [ln.strip() for ln in f if ln.strip()]
+    ids_train = read_ids("./dataset/100style/train_random_100style.txt")
+    ids_valid = read_ids("./dataset/100style/valid_random_100style.txt")
 
     # --- Dataset & Loader --- #
-    dataset_cfg = config['dataset']
-    # train_dataset = TextStyleDataset(dataset_cfg, styles_sorted)
-    # valid_dataset = TextStyleDataset(dataset_cfg, styles_sorted)
-    train_dataset = TextStyleDataset(dataset_cfg, train_styles)
-    valid_dataset = TextStyleDataset(dataset_cfg, valid_styles)
+    # train_dataset = TextStyleDataset(dataset_cfg, train_styles)
+    # valid_dataset = TextStyleDataset(dataset_cfg, valid_styles)
+    style_train = Dataset100Style(style_cfg, styles=all_styles, train=True,  use_ids=ids_train)
+    style_valid = Dataset100Style(style_cfg, styles=all_styles, train=False, use_ids=ids_valid)
+
+    hml_cfg = config['dataset_hml']
+    hml_train = DatasetHumanML3D(hml_cfg, train=True)
+    hml_valid = DatasetHumanML3D(hml_cfg, train=False)
 
     sampler_cfg = config['sampler']
-    train_sampler = SAMPLER_REGISTRY[sampler_cfg['type']](sampler_cfg, train_dataset)
-    valid_sampler = SAMPLER_REGISTRY[sampler_cfg['type']](sampler_cfg, valid_dataset)
-    
-    train_loader  = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=8)
-    valid_loader = DataLoader(valid_dataset, batch_sampler=valid_sampler, num_workers=8)
-    
+    # train_sampler = SAMPLER_REGISTRY[sampler_cfg['type']](sampler_cfg, style_train)
+    # valid_sampler = SAMPLER_REGISTRY[sampler_cfg['type']](sampler_cfg, style_valid)
+    train_loader_style  = DataLoader(style_train, batch_size=sampler_cfg["batch_size"], shuffle=True, drop_last=True)
+    valid_loader_style  = DataLoader(style_valid, batch_size=sampler_cfg["batch_size"], shuffle=False, drop_last=True)
+    train_loader_hml    = DataLoader(hml_train, batch_size=sampler_cfg["batch_size"], shuffle=True, drop_last=True)
+    valid_loader_hml    = DataLoader(hml_valid, batch_size=sampler_cfg["batch_size"], shuffle=False, drop_last=True)
+
     # --- Model --- #
     model_cfg = config['model']
     model = Text2StylizedMotion(model_cfg).to(device)
@@ -96,6 +107,8 @@ if __name__ == "__main__":
         (p for p in model.parameters() if p.requires_grad),
         lr=config['lr']
     )
+    use_bf16 = torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 8
+    amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
 
     # --- Losses & Scaler --- #
     loss_cfg = config['loss']
@@ -109,35 +122,40 @@ if __name__ == "__main__":
     scales = {}
     sum_sq = defaultdict(float)
     model.train()
-    pbar = tqdm(zip(range(config['steps']), train_loader), total=config['steps'])
+    pbar = tqdm(zip(train_loader_style, train_loader_hml), total=config['steps'])
     n = 0
-    for _, batch in pbar:
-        out = model(batch)
-        losses = {}
-        for name, fn in loss_fns.items():
-            spec = loss_cfg[name]
-            raw  = fn(spec, model, out)
-            losses[name] = raw
+    for i, (b_style, b_hml) in enumerate(pbar):
+        if i >= config['steps']: break
 
-        for name, val in losses.items():
-            sum_sq[name] += float(val.detach()) ** 2
-
-        total_loss = None
-        for name, val in losses.items():
-            scaled     = loss_cfg[name]['weight'] * val
-            total_loss = scaled if total_loss is None else total_loss + scaled
-
+        cap1, win1, len1, sty1 = b_style
+        cap2, win2, len2, sty2 = b_hml
+        batch = (cap1, win1, len1, sty1, cap2, win2, len2, sty2)
         optimizer.zero_grad(set_to_none=True)
+        with autocast(dtype=amp_dtype, enabled=torch.cuda.is_available()):
+            out = model(batch)
+            losses = {}
+            for name, fn in loss_fns.items():
+                spec = loss_cfg[name]
+                raw  = fn(spec, model, out)
+                losses[name] = raw
+
+            total_loss = None
+            for name, val in losses.items():
+                scaled     = loss_cfg[name]['weight'] * val
+                total_loss = scaled if total_loss is None else total_loss + scaled
+
         total_loss.backward()
         optimizer.step()
 
         pbar.set_postfix(loss=float(total_loss.item()))
         n += 1
 
+        for name, val in losses.items():
+            sum_sq[name] += float(val.detach().cpu()) ** 2
+
     for name, s2 in sum_sq.items():
         rms = (s2 / max(1, n)) ** 0.5
         scales[name] = max(rms, config['tau'])
-
     print("📏 Frozen RMS denominators:", {k: round(v, 6) for k, v in scales.items()})
 
     # --- Training --- #
@@ -149,20 +167,24 @@ if __name__ == "__main__":
         losses_norm_sum   = defaultdict(float)
         losses_raw_sum    = defaultdict(float)
 
-        pbar = tqdm(train_loader, desc=f"[Train] Epoch {epoch}")
+        pbar = tqdm(zip(train_loader_style, train_loader_hml), total=len(train_loader_style), desc=f"[Train] Epoch {epoch}")
         batch_idx = -1
-        for batch_idx, batch in enumerate(pbar):
-            out = model(batch)
-            losses = {}
-            total_loss = 0.0
-            for name, fn in loss_fns.items():
-                spec   = loss_cfg[name]
-                raw    = fn(spec, model, out)
-                norm   = raw / scales[name]
-                scaled = norm * spec['weight']
-                losses[name] = (scaled, norm, raw)
-                total_loss = total_loss + scaled
+        for batch_idx, (b_style, b_hml) in enumerate(pbar):
+            cap1, win1, len1, sty1 = b_style
+            cap2, win2, len2, sty2 = b_hml
+            batch = (cap1, win1, len1, sty1, cap2, win2, len2, sty2)
             optimizer.zero_grad(set_to_none=True)
+            with autocast(dtype=amp_dtype, enabled=torch.cuda.is_available()):
+                out = model(batch)
+                losses = {}
+                total_loss = 0.0
+                for name, fn in loss_fns.items():
+                    spec   = loss_cfg[name]
+                    raw    = fn(spec, model, out)
+                    norm   = raw / scales[name]
+                    scaled = norm * spec['weight']
+                    losses[name] = (scaled, norm, raw)
+                    total_loss = total_loss + scaled
             total_loss.backward()
             optimizer.step()
             pbar.set_postfix(loss=float(total_loss.item()))
@@ -191,10 +213,13 @@ if __name__ == "__main__":
         losses_norm_sum   = defaultdict(float)
         losses_raw_sum    = defaultdict(float)
 
-        with torch.no_grad():
-            pbar = tqdm(valid_loader, desc=f"[Valid] Epoch {epoch if epoch is not None else ''}".strip())
+        with torch.no_grad(), autocast(dtype=amp_dtype, enabled=torch.cuda.is_available()):
+            pbar = tqdm(zip(valid_loader_style, valid_loader_hml), total=len(valid_loader_style), desc=f"[Valid] Epoch {epoch if epoch is not None else ''}".strip())
             batch_idx = -1
-            for batch_idx, batch in enumerate(pbar):
+            for batch_idx, (b_style, b_hml) in enumerate(pbar):
+                cap1, win1, len1, sty1 = b_style
+                cap2, win2, len2, sty2 = b_hml
+                batch = (cap1, win1, len1, sty1, cap2, win2, len2, sty2)
                 out = model(batch)
                 losses = {}
                 total_loss = 0.0
@@ -232,9 +257,9 @@ if __name__ == "__main__":
             )
 
             plot_tsne( 
-                model, valid_loader, device, epoch, title="valid",
+                model, valid_loader_style, device, epoch, title="valid",
                 result_dir=config["result_dir"],
-                label_to_name_dict=valid_dataset.style_idx_to_style,
+                label_to_name_dict=style_valid.style_idx_to_style,
                 writer=writer
             )
 

@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from salad.models.denoiser.transformer import MultiheadAttention
 from model.lora import LORA_REGISTRY
+from model.gate import JointGate
 
 
 # --- Skip Transformer --- #
@@ -31,7 +32,9 @@ class DenseFiLM(nn.Module):
         y0 = self.linear[1](x)
 
         if self.use_lora and style is not None:
-            delta = self.lora(x.unsqueeze(1), style).squeeze(1)
+            A, B  = self.lora(style)
+            tmp   = torch.einsum('bd,brd->br', x, A)
+            delta = self.lora.scale * torch.einsum('bdr,br->bd', B, tmp)
             y = y0 + delta
         else:
             y = y0
@@ -63,7 +66,7 @@ class MultiheadAttention(nn.Module):
         else:
             self.use_lora = False
 
-    def forward(self, query, key, value, key_padding_mask=None, need_weights=True, average_attn_weights=False, style=None):
+    def forward(self, query, key, value, key_padding_mask=None, need_weights=True, average_attn_weights=False, style=None, gate=None):
         """
         query: [B, T1, D]
         key: [B, T2, D]
@@ -86,6 +89,8 @@ class MultiheadAttention(nn.Module):
             Aq, Bq = self.q_lora(style)
             tmp = torch.einsum('btd,brd->btr', q_in, Aq)
             dq  = self.q_lora.scale * torch.einsum('bdr,btr->btd', Bq, tmp)
+            if gate is not None:
+                dq = gate * dq
             q = q + dq
             # k = k + self.k_lora(k_in, style)
             # v = v + self.v_lora(v_in, style)
@@ -112,6 +117,8 @@ class MultiheadAttention(nn.Module):
             Ao, Bo = self.o_lora(style)
             tmp = torch.einsum('btd,brd->btr', attn_output, Ao)
             do  = self.o_lora.scale * torch.einsum('bdr,btr->btd', Bo, tmp)
+            if gate is not None:
+                do = gate * do
             out = out + do
 
         if need_weights:
@@ -121,7 +128,7 @@ class MultiheadAttention(nn.Module):
         else:
             return out, None
     
-    def forward_with_fixed_attn_weights(self, attn_weights, value, style=None):
+    def forward_with_fixed_attn_weights(self, attn_weights, value, style=None, gate=None):
         """
         Assume that the attention weights are already computed.
         """
@@ -142,8 +149,12 @@ class MultiheadAttention(nn.Module):
         # Output projection (+ optional O-LoRA; uses post-attn features as input)
         out = self.Wo(attn_output)
         if self.use_lora and style is not None:
-            out = out + self.o_lora(attn_output, style)
-
+            Ao, Bo = self.o_lora(style)
+            tmp = torch.einsum('btd,brd->btr', attn_output, Ao)
+            do  = self.o_lora.scale * torch.einsum('bdr,btr->btd', Bo, tmp)
+            if gate is not None:
+                do = gate * do
+            out = out + do
         return out, attn_weights
 
 
@@ -187,6 +198,13 @@ class STTransformerLayer(nn.Module):
         self.cross_film = DenseFiLM(config['film'], opt)
         self.ffn_film = DenseFiLM(config['film'], opt)
 
+        # Gate (optional)
+        gate_cfg = config.get("gate", None)
+        if gate_cfg is not None:
+            self.joint_gate = JointGate(gate_cfg)
+        else:
+            self.joint_gate = None
+
     def _sa_block(self, x, style=None, fixed_attn=None):
         x = self.skel_norm(x)
         if fixed_attn is None:
@@ -205,13 +223,13 @@ class STTransformerLayer(nn.Module):
         x = self.temp_dropout(x)
         return x, attn
 
-    def _ca_block(self, x, mem, style=None, mask=None, fixed_attn=None):
+    def _ca_block(self, x, mem, style=None, mask=None, fixed_attn=None, gate=None):
         x = self.cross_src_norm(x)
         mem = self.cross_tgt_norm(mem)
         if fixed_attn is None:
-            x, attn = self.cross_attn.forward(x, mem, mem, key_padding_mask=mask, need_weights=True, average_attn_weights=False, style=style)
+            x, attn = self.cross_attn.forward(x, mem, mem, key_padding_mask=mask, need_weights=True, average_attn_weights=False, style=style, gate=gate)
         else:
-            x, attn = self.cross_attn.forward_with_fixed_attn_weights(fixed_attn, mem, style=style)
+            x, attn = self.cross_attn.forward_with_fixed_attn_weights(fixed_attn, mem, style=style, gate=gate)
         x = self.cross_dropout(x)
         return x, attn
     
@@ -260,7 +278,18 @@ class STTransformerLayer(nn.Module):
     
         # Cross attention
         x_c = x.reshape(B, T * J, D)
-        ca_out, ca_weight = self._ca_block(x_c, memory, style=style, mask=memory_mask, fixed_attn=cross_attn)
+        gate = None
+        if self.joint_gate is not None:
+            if memory_mask is not None:
+                valid = ~memory_mask
+                w = valid.float()
+                pooled = (memory * w.unsqueeze(-1)).sum(dim=1)
+                denom = w.sum(dim=1, keepdim=True).clamp(min=1e-6)
+                text_pool = pooled / denom
+            else:
+                text_pool = memory.mean(dim=1)
+            gate = self.joint_gate(text_pool, T)
+        ca_out, ca_weight = self._ca_block(x_c, memory, style=style, mask=memory_mask, fixed_attn=cross_attn, gate=gate)
         ca_out = ca_out.reshape(B, T, J, D)
         ca_out = featurewise_affine(ca_out, cross_cond)
         x = x + ca_out

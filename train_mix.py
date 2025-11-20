@@ -29,20 +29,6 @@ def set_seed(seed=42):
         torch.cuda.manual_seed_all(seed)
 
 
-# def load_config():
-#     parser = argparse.ArgumentParser()
-#     parser.add_argument('--config', type=str, required=True, help='Path to config file (YAML)')
-#     args = parser.parse_args()
-#     config_path = args.config
-#     with open(config_path, 'r') as f:
-#         config = yaml.safe_load(f)
-#     config_basename = os.path.basename(config_path)
-#     config["run_name"] = os.path.splitext(config_basename)[0]
-#     config["result_dir"] = os.path.join(config["result_dir"], config["run_name"])
-#     config["checkpoint_dir"] = os.path.join(config["checkpoint_dir"], config["run_name"])
-#     return config
-
-
 def load_config():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, required=True, help='Path to config file (YAML)')
@@ -90,7 +76,7 @@ if __name__ == "__main__":
         train_styles, valid_styles = train_test_split(styles_sorted, test_size=config['valid_size'], random_state=config["random_seed"])
 
     # --- Dataset & Loader --- #
-    dataset_cfg = config['dataset']
+    dataset_cfg   = config['dataset']
     train_dataset = MixedTextStyleDataset(dataset_cfg, train_styles)
     valid_dataset = MixedTextStyleDataset(dataset_cfg, valid_styles)
 
@@ -98,7 +84,7 @@ if __name__ == "__main__":
     # train_sampler = SAMPLER_REGISTRY[sampler_cfg['type']](sampler_cfg, train_dataset)
     # valid_sampler = SAMPLER_REGISTRY[sampler_cfg['type']](sampler_cfg, valid_dataset)
     
-    train_loader  = DataLoader(train_dataset, batch_size=dataset_cfg["batch_size"], num_workers=8, shuffle=True, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=dataset_cfg["batch_size"], num_workers=8, shuffle=True, pin_memory=True)
     valid_loader = DataLoader(valid_dataset, batch_size=dataset_cfg["batch_size"], num_workers=8, shuffle=True, pin_memory=True)
     
     # --- Model --- #

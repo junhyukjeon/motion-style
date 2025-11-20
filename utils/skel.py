@@ -13,35 +13,49 @@ T2M_TEMPLATE = np.array([
     [0,-1,0], [0,-1,0], [0,-1,0],
 ], dtype=np.float32)
 
-def unit_dirs(template):
+def _unit_dirs(template: np.ndarray) -> np.ndarray:
     u = template.astype(np.float32).copy()
+    u[0] = 0.0
     for j in range(1, len(u)):
         n = np.linalg.norm(u[j])
         u[j] = u[j] / (n + 1e-8) if n > 0 else 0.0
-    u[0] = 0.0
     return u
 
 class Skeleton:
-    def __init__(self, parents, lengths):
-        """
-        parents : list[int] (len J), root has -1
-        lengths : (J,) or (J,1) bone lengths (same joint order)
-        """
+    def __init__(self, parents, lengths, *,
+                 face_indices=(1,2,11,12),
+                 up_axis=(0,1,0),
+                 target_forward=(0,0,1),
+                 smooth_forward_sigma=0.0,
+                 first_frame_root_identity=True,
+                 zero_root_length=True):
+        
         self.parents = [int(p) for p in parents]
         self.J = len(self.parents)
         self.root = self.parents.index(-1)
 
+        # ============ #
+        # Policy knobs #
+        # ============ #
+        self.face_indices              = tuple(int(i) for i in face_indices)
+        self.up_axis                   = np.asarray(up_axis, dtype=np.float32)
+        self.target_forward            = np.asarray(target_forward, dtype=np.float32)
+        self.smooth_forward_sigma      = float(smooth_forward_sigma)
+        self.first_frame_root_identity = bool(first_frame_root_identity)
+        
         # T2M unit directions
-        dirs = torch.tensor(unit_dirs(T2M_TEMPLATE), dtype=torch.float32)
+        dirs_np = _unit_dirs(T2M_TEMPLATE)
+        dirs    = torch.tensor(dirs_np, dtype=torch.float32)
 
-        # make (J,1) and zero root length
+        # Bone lengths -> (J,1) and optional zero root length
         L = torch.as_tensor(lengths, dtype=torch.float32).view(self.J, 1).clone()
-        # L[self.root] = 0.0
+        if zero_root_length:
+            L[self.root] = 0.0
 
-        # final offsets = dir * length
-        self.offsets = dirs * L  # (J,3)
+        # Final offsets (J,3) = dir * length
+        self.offsets = dirs * L 
 
-        # simple parent->child order
+        # Parent-first joint order
         kids = [[] for _ in range(self.J)]
         for j, p in enumerate(self.parents):
             if p != -1:
@@ -54,14 +68,7 @@ class Skeleton:
         self.order = order
 
     def forward_kinematics_cont6d(self, cont6d_params, root_pos, do_root_R=True):
-        """
-        cont6d_params: (B, J, 6) local 6D rotations
-        root_pos:      (B, 3)
-        returns:       (B, J, 3)
-        """
         B, J = cont6d_params.shape[:2]
-        assert J == self.J
-
         device, dtype = cont6d_params.device, cont6d_params.dtype
         joints = torch.zeros((B, J, 3), device=device, dtype=dtype)
         joints[:, self.root] = root_pos
@@ -82,9 +89,56 @@ class Skeleton:
             joints[:, j] = (Rw[j] @ off[j].unsqueeze(-1)).squeeze(-1) + joints[:, p]
         return joints
 
+    def inverse_kinematics(self, joints, root_quat):
+        joints = np.asarray(joints, dtype=np.float32)
+        T, J = joints.shape[:2]
 
+        def _normalize(v):
+            return v / np.maximum(np.linalg.norm(v, axis=-1, keepdims=True), 1e-8)
 
+        # Root rotation
+        if root_quat is None:
+            r_hip, l_hip, r_sh, l_sh = self.face_indices
+            across = _normalize((joints[:, r_hip] - joints[:, l_hip]) +
+                                (joints[:, r_sh] - joints[:, l_sh]))
+            up = np.broadcast_to(self.up_axis[None, :], across.shape)
+            forward = _normalize(np.cross(up, across, axis=-1))
+            if self.smooth_forward_sigma > 0:
+                try:
+                    import scipy.ndimage as ndi
+                    forward = _normalize(ndi.gaussian_filter1d(
+                        forward, self.smooth_forward_sigma, axis=0, mode="nearest"))
+                except Exception:
+                    pass
+            tgt = np.broadcast_to(self.target_forward[None, :], forward.shape)
+            root_quat = qbetween_np(forward, tgt).astype(np.float32)
+            if self.first_frame_root_identity:
+                root_quat[0] = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        else:
+            root_quat = np.asarray(root_quat, dtype=np.float32)
+            assert root_quat.shape == (T, 4), f"root_quat should be (T,4), got {root_quat.shape}"
 
+        # Template unit directions u_j from offsets (I have no idea what this means)
+        dirs = self.offsets.detach().cpu().numpy().astype(np.float32)
+        nrm  = np.linalg.norm(dirs, axis=-1, keepdims=True)
+        u_dirs = np.where(nrm > 0, dirs / np.maximum(nrm, 1e-8), 0.0)
+
+        # One-pass parent-first IK
+        quat_local = np.zeros((T, J, 4), dtype=np.float32)
+        quat_world = np.zeros((T, J, 4), dtype=np.float32)
+        quat_local[:, self.root] = root_quat
+        quat_world[:, self.root] = root_quat
+
+        for j in self.order[1:]:
+            p = self.parents[j]
+            v = _normalize(joints[:, j] - joints[:, p])
+            u = np.broadcast_to(u_dirs[j], (T, 3))
+            Rwv = qbetween_np(u, v)
+            Rpl = qinv_np(quat_world[:, p])
+            Rlj = qmul_np(Rpl, Rwv)
+            quat_local[:, j] = Rlj
+            quat_world[:, j] = qmul_np(quat_world[:, p], Rlj)
+        return quat_local
 
 #     # ---------- basic accessors ----------
 

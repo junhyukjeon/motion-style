@@ -6,43 +6,55 @@ random_seed: 42
 
 # --- Dataset --- #
 dataset:
-  motion_dir  : ./dataset/100style/new_joint_vecs
-  text_dir    : ./dataset/100style/texts
   mean_path   : ./checkpoints/t2m/Comp_v6_KLD005/meta/mean.npy
   std_path    : ./checkpoints/t2m/Comp_v6_KLD005/meta/std.npy
-  style_json  : ./dataset/100style/100style_clean_clean.json
-  content_json: ./dataset/100style/10content_clean_clean.json
+  # mean_path   : ./dataset/smoodi/Mean.npy
+  # std_path    : ./dataset/smoodi/Std.npy
+  min_frames  : 40
+  max_frames  : 196
   unit_length : 4
-  min_frames  : 128
-  max_frames  : 128
+  split_file  : ./dataset/smoodi/train.txt
+
+  # motion_dir  : ./dataset/100style/new_joint_vecs
+  # text_dir    : ./dataset/100style/texts
+  style_json  : ./dataset/100style/100style_clean_clean.json
+  batch_size  : 32
+  # content_json: ./dataset/100style/10content_clean_clean.json
+  # min_frames  : 128
+  # max_frames  : 128
 
 # --- Sampler Settings --- #
 sampler:
-  type: TrainSampler
-  batch_size: 64
-  samples_per_style: 8
+  type: MixedSampler
+  batch_size: 32
+  samples_per_style: 4
 
 # --- Model --- #
 model:
   denoiser:
     transformer:
       layer:
-        attention: {}
-        film:
+        attention:
           lora:
-            type: HyperLoRA
-            rank: 2
+            type: StyleLoRA
+            rank: 8
             scale: 1.0
             style_dim: 256
+            num_layers: 4
             in_dim: 256
-            out_dim: 512
-            hidden_dim: 512  
+            out_dim: 256
+            hidden_dim: 512
+            block:
+              dropout: 0.1
+              style_dim: 256
+              hidden_dim: 512
+              num_heads: 8
+        film: {}
   style_encoder: 
-    type: StyleTransformer
+    type: AxialStyleEncoder
     dropout: 0.1
     style_dim: 256
     num_layers: 4
-    num_queries: 8
     block:
       dropout: 0.1
       style_dim: 256
@@ -52,10 +64,15 @@ model:
   style_drop: 0.1
   text_weight: 7.5
   style_weight: 5.5
+  cond_weight: 1.5
 
 # --- Losses --- #
 loss:
-  velocity:
+  style:
+    weight: 1.0
+  content:
+    weight: 1.0
+  cycle:
     weight: 1.0
   supcon:
     weight: 1.0
@@ -72,6 +89,6 @@ steps: 300
 tau: 0.001
 
 # --- Training --- #
-epochs: 10000
+epochs: 200
 lr: 0.0001
 valid_size: 0.2

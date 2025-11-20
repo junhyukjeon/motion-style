@@ -19,8 +19,6 @@ def plot_tsne(model, loader, device, epoch=None, title="valid", result_dir="", l
     with torch.no_grad():
         for batch in loader:
             style, style_idx = model.style(batch)
-            if style.dim() == 4:
-                style = style.mean(dim=(1, 2))
 
             # style = style.cpu()
             # style_idx = style_idx.cpu()

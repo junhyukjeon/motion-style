@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-from data.dataset import Dataset100Style, DatasetHumanML3D
+from data.dataset import TextStyleDataset
 from data.sampler import StyleSampler
 from model.t2sm import Text2StylizedMotion
 from utils.motion import recover_from_ric
@@ -202,86 +202,53 @@ if __name__ == "__main__":
     set_seed(config["random_seed"])
 
     # --- Style Split --- #
-    # with open(config["dataset"]["style_json"]) as f:
-    #     styles_to_ids = json.load(f)
-    # styles_sorted = sorted(styles_to_ids.keys())
+    with open(config["dataset"]["style_json"]) as f:
+        styles_to_ids = json.load(f)
+    styles_sorted = sorted(styles_to_ids.keys())
     # train_styles, valid_styles = train_test_split(styles_sorted, test_size=config['valid_size'], random_state=config["random_seed"])
 
+    # --- Dataset & Loader --- #
+    dataset_cfg = config['dataset']
+    dataset = TextStyleDataset(dataset_cfg, styles_sorted)
+
     # --- Model --- #
+    model_cfg = config['model']
     model = load_model(config, device)
 
-    # --- Datasets (new) --- #
-    style_cfg = config['dataset_style']  # your new block for 100STYLE
-    with open(style_cfg["style_json"], "r", encoding="utf-8") as f:
-        styles_to_ids = json.load(f)
-    all_styles = sorted(styles_to_ids.keys())
-
-    # 100STYLE dataset (eval mode so center-crop is used)
-    ds_style = Dataset100Style(style_cfg, styles=all_styles, train=False)
-
-    # Pick a target style index and subset to only those items
-    target_style_idx = 0
-    if target_style_idx not in ds_style.style_idx_to_style:
-        raise ValueError(f"target_style_idx={target_style_idx} not in dataset.")
-
-    indices = [i for i, it in enumerate(ds_style.items) if it["style_idx"] == target_style_idx]
-    if len(indices) == 0:
-        raise RuntimeError(f"No items found for style_idx={target_style_idx} ({ds_style.style_idx_to_style[target_style_idx]}).")
-
-    # Build a DataLoader over that subset
-    from torch.utils.data import Subset
-    B = config['sampler']['batch_size'] if 'sampler' in config else 16
-    loader = DataLoader(Subset(ds_style, indices), batch_size=B, shuffle=True, num_workers=0)
-
-    # # --- Output dir --- #
-    # output_dir = os.path.join(config["result_dir"], "stylized")
-    # reset_dir(output_dir)
-
-    # --- Output dir --- #
-    # Put videos under: result_dir/stylized/<style_weight>/
-    style_weight = config["model"].get("style_weight", None)
-
-    if style_weight is not None:
-        # make it filesystem-friendly: e.g. 1.5 -> "w1p5"
-        style_tag = f"w{style_weight}".replace(".", "p")
-        output_dir = os.path.join(config["result_dir"], "stylized", style_tag)
-    else:
-        # fallback if style_weight isn't defined
-        output_dir = os.path.join(config["result_dir"], "stylized")
-
+    output_dir = os.path.join(config["result_dir"], "stylized")
     reset_dir(output_dir)
 
-    # --- Mean & Std (tensors on device) --- #
-    mean = torch.tensor(np.load(style_cfg["mean_path"]), dtype=torch.float32, device=device)
-    std  = torch.tensor(np.load(style_cfg["std_path"]),  dtype=torch.float32, device=device)
+    # -- Mean & Standard Deviation --- #
+    mean = np.load(dataset_cfg["mean_path"])
+    mean = torch.tensor(mean, dtype=torch.float32, device=device)
+    std = np.load(dataset_cfg["std_path"])
+    std = torch.tensor(std, dtype=torch.float32, device=device)
 
-    # --- One batch ---
-    (cap1, win1, len1, sty1) = next(iter(loader))      # captions, (B,T,D), lengths, style_idx
-    motions = win1.to(device)                           # normalized
-    captions = list(cap1)                               # list[str]
+    target_style_idx = 15
+    target_style     = dataset.style_idx_to_style[target_style_idx]
+    sampler_cfg = config['sampler']
+    sampler = StyleSampler(sampler_cfg, dataset, target_style=target_style_idx)
+    loader = DataLoader(dataset, batch_sampler=sampler, num_workers=0)
 
-    # Optional: pair/mismatch like your old code (swap every other item)
+    batch = next(iter(loader))
+    motions, captions = batch[0].to(device), batch[1]
     idx = torch.arange(motions.shape[0], device=motions.device)
-    motions_swapped = motions[idx ^ 1]
+    motions = motions[idx ^ 1]
 
-    # --- Generate stylized (uses your existing signature) ---
-    stylized, captions_out = model.generate(motions_swapped, captions, len1, len1)
-
-    # --- Denormalize stylized & reference (reference = input before swap, like before) ---
-    stylized  = stylized * std + mean
+    stylized, captions = model.generate(motions, captions, 40)
+    stylized = stylized * std + mean
+    # idx = torch.arange(stylized.shape[0], device=stylized.device)
     reference = motions * std + mean
+    # reference = reference
 
-    # --- Recover joints and render ---
-    joints_stylized  = recover_from_ric(stylized, 22).detach().cpu().numpy()    # (B, T, 22, 3)
+    joints_stylized = recover_from_ric(stylized, 22).detach().cpu().numpy()
     joints_reference = recover_from_ric(reference, 22).detach().cpu().numpy()
-
     kinematic_tree = [[0, 2, 5, 8, 11], [0, 1, 4, 7, 10],
-                    [0, 3, 6, 9, 12, 15], [9, 14, 17, 19, 21],
-                    [9, 13, 16, 18, 20]]
+                        [0, 3, 6, 9, 12, 15], [9, 14, 17, 19, 21],
+                        [9, 13, 16, 18, 20]]
 
-    style_name = ds_style.style_idx_to_style[target_style_idx]
     for i in tqdm(range(stylized.size(0)), desc="Rendering videos", leave=False):
-        cap = captions_out[i] if isinstance(captions_out, (list, tuple)) else str(captions_out[i])
+        cap = captions[i] if isinstance(captions, (list, tuple)) else str(captions[i])
         cap = slug(cap)
         save_path = os.path.join(output_dir, f"{cap}_{i}.mp4")
 
@@ -290,7 +257,7 @@ if __name__ == "__main__":
             kinematic_tree=kinematic_tree,
             joints_a=joints_stylized[i],
             joints_b=joints_reference[i],
-            titles=(f"{style_name} — {cap}", "Reference"),
+            titles=(f"{target_style} — {cap}", "Reference"),
             figsize=(12, 6),
             fps=20,
             radius=4.0,

@@ -11,7 +11,7 @@ import time
 import random
 from tqdm import tqdm
 
-from eval2.dataset import Text2MotionTestDataset #, build_dict_from_txt
+from eval2.dataset import Text2MotionTestDataset
 from eval2.metrics import TM2TMetrics
 from eval2.evaluator_wrapper import StyleClassification
 
@@ -76,6 +76,7 @@ def collate_fn(batch):
         "length2": [b[9] for b in notnone_batches],
     }
     return adapted_batch
+
 
 class SmoodiEval():
     def __init__(self, config, device="cuda:0"):
@@ -152,10 +153,6 @@ class SmoodiEval():
             motion_dir2=pjoin(data_root, "../100style/new_joint_vecs"),
             text_dir2=pjoin(data_root, "../100style/texts"),
         )
-        # self.mean = torch.from_numpy(mean).float().to(device)
-        # self.std = torch.from_numpy(std).float().to(device)
-        # self.mean_eval = torch.from_numpy(np.load(pjoin(data_root, "../100style/Mean.npy"))).float().to(device)
-        # self.std_eval = torch.from_numpy(np.load(pjoin(data_root, "../100style/Std.npy"))).float().to(device)
         self.data_loader = DataLoader(
             dataset,
             batch_size=32,
@@ -192,7 +189,6 @@ class SmoodiEval():
         motion_name = self.label_to_motion[str(predicted[0].cpu().numpy())]
         base_name = self.label_to_motion[str(label[0].cpu().numpy())]
         print(f"Name: {base_name} -> {motion_name}")
-
 
         # joints recover
         joints_rst = self.data_loader.dataset.feats2joints(feats_rst)
@@ -234,7 +230,6 @@ class SmoodiEval():
             "length": lengths,
         }
 
-
     def evaluate(self):
         for i, batch in enumerate(tqdm(self.data_loader, desc="Evaluating")):
             # batch = [word_embeddings, pos_one_hots, caption, sent_len, motion, m_length, tokens, caption2, sent_len2, label, style_text]
@@ -266,17 +261,6 @@ class SmoodiEval():
             elif isinstance(v, np.ndarray):
                 print(f"{k}: {v.item()}")
         return metrics_dict
-
-
-# def load_config(config_path):
-#     with open(config_path, 'r') as f:
-#         config = yaml.safe_load(f)
-
-#     config_basename = os.path.basename(config_path)
-#     config["run_name"] = os.path.splitext(config_basename)[0]
-#     config["result_dir"] = os.path.join(config["result_dir"], config["run_name"])
-#     config["checkpoint_dir"] = os.path.join(config["checkpoint_dir"], config["run_name"])
-#     return config
 
 
 def load_config():

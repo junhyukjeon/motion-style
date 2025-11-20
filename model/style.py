@@ -7,7 +7,6 @@ from salad.models.denoiser.transformer import MultiheadAttention
 # from salad.models.vae.model import VAE
 # from salad.utils.get_opt import get_opt
 
-
 # --- Style Transformer --- #
 class CrossAttentionBlock(nn.Module):
     def __init__(self, config):
@@ -24,8 +23,8 @@ class CrossAttentionBlock(nn.Module):
         self.norm2   = nn.LayerNorm(style_dim)
         self.dropout = nn.Dropout(config['dropout'])
 
-    def forward(self, query, context):
-        out, _ = self.attn(query, context, context)
+    def forward(self, query, context, mask=None):
+        out, _ = self.attn(query, context, context, key_padding_mask=~mask if mask is not None else None)
         x = self.norm1(query + self.dropout(out))
         x = self.norm2(x + self.dropout(self.ffn(x)))
         return x
@@ -50,22 +49,48 @@ class StyleTransformer(nn.Module):
 
         self.head = nn.Sequential(
             nn.LayerNorm(style_dim),
-            nn.Linear(style_dim, style_dim),
+            nn.Linear(style_dim, config["style_dim"]),
             nn.GELU(),
-            nn.Linear(style_dim, style_dim),
+            nn.Linear(config["style_dim"], style_dim),
         )
 
-    def forward(self, x):
+    def forward(self, x, mask=None):
         B, T, J, _ = x.shape
         x = self.project(x)
         x = x.reshape(B, T * J, x.shape[-1])
+        if mask is not None:
+            mask = torch.repeat_interleave(mask, J, dim=1)
         query = self.query.expand(B, -1, -1)
         for block in self.blocks:
-            query = block(query, x)
+            query = block(query, x, mask=mask)
         style = query.mean(dim=1)
         style = self.head(style)
         return style
 
+
+# --- Style MLP --- #
+class StyleMLP(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        style_dim = config['style_dim']
+
+        self.mlp = nn.Sequential(
+            nn.Linear(32, style_dim),
+            nn.ReLU(),
+            nn.Linear(style_dim, style_dim),
+            nn.ReLU(),
+            nn.Linear(style_dim, style_dim),
+            nn.ReLU(),
+            nn.Linear(style_dim, style_dim),
+        )
+
+    def forward(self, x, mask):
+        B, T, J, C = x.shape
+        style = self.mlp(x)
+        if mask is not None:
+            style = style.masked_fill(~mask[:, :, None, None], 0.0)
+        return style
+    
 
 # --- Axial Style Encoder --- #
 class AxialSelfAttentionBlock(nn.Module):
@@ -75,6 +100,7 @@ class AxialSelfAttentionBlock(nn.Module):
         hidden_dim = config["hidden_dim"]
         num_heads  = config["num_heads"]
         dropout    = config["dropout"]
+        repeats    = config["repeats"]
 
         # Positional encodings
         self.pos_T = PositionalEmbedding(style_dim, dropout=0.0)
@@ -83,54 +109,79 @@ class AxialSelfAttentionBlock(nn.Module):
         nn.init.trunc_normal_(self.pos_J.weight, std=0.02)
 
         # Temporal branch (per joint across time)
-        self.t_norm1 = nn.LayerNorm(style_dim)
-        self.t_attn  = MultiheadAttention(style_dim, num_heads, dropout, batch_first=True)
-        self.t_drop  = nn.Dropout(dropout)
-        self.t_norm2 = nn.LayerNorm(style_dim)
-        self.t_ffn   = nn.Sequential(
-            nn.Linear(style_dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, style_dim),
-        )
-        self.t_ffn_drop = nn.Dropout(dropout)
+        self.t_norm1 = nn.ModuleList([nn.LayerNorm(style_dim) for _ in range(repeats)])
+        self.t_attn  = nn.ModuleList([MultiheadAttention(style_dim, num_heads, dropout, batch_first=True) for _ in range(repeats)])
+        self.t_drop  = nn.ModuleList([nn.Dropout(dropout) for _ in range(repeats)])
+        self.t_norm2 = nn.ModuleList([nn.LayerNorm(style_dim) for _ in range(repeats)])
+        self.t_ffn   = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(style_dim, hidden_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, style_dim),
+            ) for _ in range(repeats)
+        ])
+        self.t_ffn_drop = nn.ModuleList([nn.Dropout(dropout) for _ in range(repeats)])
 
         # Joint branch (per time across joints)
-        self.j_norm1 = nn.LayerNorm(style_dim)
-        self.j_attn  = MultiheadAttention(style_dim, num_heads, dropout, batch_first=True)
-        self.j_drop  = nn.Dropout(dropout)
-        self.j_norm2 = nn.LayerNorm(style_dim)
-        self.j_ffn   = nn.Sequential(
-            nn.Linear(style_dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, style_dim),
-        )
-        self.j_ffn_drop = nn.Dropout(dropout)
+        self.j_norm1 = nn.ModuleList([nn.LayerNorm(style_dim) for _ in range(repeats)])
+        self.j_attn  = nn.ModuleList([MultiheadAttention(style_dim, num_heads, dropout, batch_first=True) for _ in range(repeats)])
+        self.j_drop  = nn.ModuleList([nn.Dropout(dropout) for _ in range(repeats)])
+        self.j_norm2 = nn.ModuleList([nn.LayerNorm(style_dim) for _ in range(repeats)])
+        self.j_ffn   = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(style_dim, hidden_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, style_dim),
+            ) for _ in range(repeats)
+        ])
+        self.j_ffn_drop = nn.ModuleList([nn.Dropout(dropout) for _ in range(repeats)])
 
-    def forward(self, x):
+    def forward(self, x, len_mask=None):
         B, T, J, D = x.shape
 
-        # Temporal self-attention (per joint)
-        xt = x.permute(0, 2, 1, 3).contiguous().view(B * J, T, D) # (B, T, J, D) -> (B*J, T, D)
-        xt = self.pos_T(xt)                                       # Add temporal positional embeddings
+        # -------- Temporal self-attn (per joint) --------
+        xt = x.permute(0, 2, 1, 3).contiguous().view(B * J, T, D)   # (B*J, T, D)
+        xt = self.pos_T(xt)
 
-        xtn = self.t_norm1(xt)                                    
-        t_out, _ = self.t_attn(xtn, xtn, xtn)                     
-        xt = xt + self.t_drop(t_out)
-        xt = xt + self.t_ffn_drop(self.t_ffn(self.t_norm2(xt)))
+        if len_mask is not None:
+            tm = len_mask[:, None, :].expand(B, J, T).reshape(B * J, T)  # True=valid
+            tm_kpm = ~tm  # key_padding_mask expects True=maskout
+        else:
+            tm = None
+            tm_kpm = None
 
-        # Back to (B, T, J, D)
-        x = xt.view(B, J, T, D).permute(0, 2, 1, 3).contiguous()
+        # Apply each temporal repeat with its own weights
+        for r in range(len(self.t_attn)):
+            xtn = self.t_norm1[r](xt)
+            t_out, _ = self.t_attn[r](xtn, xtn, xtn, key_padding_mask=tm_kpm)
+            xt = xt + self.t_drop[r](t_out)
+            xt = xt + self.t_ffn_drop[r](self.t_ffn[r](self.t_norm2[r](xt)))
+            if tm is not None:
+                xt = xt.masked_fill((~tm)[..., None], 0.0)
 
-        # Joint self-attention (per time)
-        xj = x.view(B * T, J, D)                                  # (B, T, J, D) -> (B*T, J, D)
-        xj = xj + self.pos_J(self.j_index[:J])[None, :, :]        # Add learned joint embeddings
+        x = xt.view(B, J, T, D).permute(0, 2, 1, 3).contiguous()    # (B, T, J, D)
 
-        xjn = self.j_norm1(xj)
-        j_out, _ = self.j_attn(xjn, xjn, xjn)
-        xj = xj + self.j_drop(j_out)
-        xj = xj + self.j_ffn_drop(self.j_ffn(self.j_norm2(xj)))
+        # -------- Joint self-attn (per time) --------
+        xj = x.view(B * T, J, D)
+        xj = xj + self.pos_J(self.j_index[:J])[None, :, :]
+
+        if len_mask is not None:
+            jm = len_mask.reshape(B * T)[:, None].expand(B * T, J)   # (B*T, J), True=valid
+            jm_kpm = ~jm
+        else:
+            jm = None
+            jm_kpm = None
+
+        # Apply each joint repeat with its own weights
+        for r in range(len(self.j_attn)):
+            xjn = self.j_norm1[r](xj)
+            j_out, _ = self.j_attn[r](xjn, xjn, xjn, key_padding_mask=jm_kpm)
+            xj = xj + self.j_drop[r](j_out)
+            xj = xj + self.j_ffn_drop[r](self.j_ffn[r](self.j_norm2[r](xj)))
+            if jm is not None:
+                xj = xj.masked_fill((~jm)[..., None], 0.0)
 
         # Back to (B, T, J, D)
         x = xj.view(B, T, J, D)
@@ -148,6 +199,10 @@ class AxialStyleEncoder(nn.Module):
             nn.Linear(32, style_dim),
             nn.ReLU(),
             nn.Linear(style_dim, style_dim),
+            nn.ReLU(),
+            nn.Linear(style_dim, style_dim),
+            nn.ReLU(),
+            nn.Linear(style_dim, style_dim),
         )
 
         # Axial blocks
@@ -159,10 +214,15 @@ class AxialStyleEncoder(nn.Module):
         # Final norm
         self.norm = nn.LayerNorm(style_dim)
 
-    def forward(self, x):
+    def forward(self, x, len_mask):
         x = self.project(x)
+
+        if len_mask is not None:
+            x = x.masked_fill((~len_mask[:, :, None])[..., None], 0.0)
+
         for block in self.blocks:
-            x = block(x)
+            x = block(x, len_mask=len_mask)
+
         x = self.norm(x)
         return x
 
@@ -170,4 +230,5 @@ class AxialStyleEncoder(nn.Module):
 STYLE_REGISTRY = {
     "StyleTransformer": StyleTransformer,
     "AxialStyleEncoder": AxialStyleEncoder,
+    "StyleMLP": StyleMLP,
 }

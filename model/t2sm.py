@@ -83,25 +83,41 @@ class Text2StylizedMotion(nn.Module):
 
     def forward(self, batch):
         # To device
-        motion, text, style_idx, content_idx = batch
-        motion, style_idx = motion.to(self.device), style_idx.to(self.device)
-        B, T     = motion.shape[0], motion.shape[1] // 4
-        lengths  = torch.full((B,), T, device=motion.device, dtype=torch.long)
-        len_mask = lengths_to_mask(lengths)
+        # motion, text, style_idx, content_idx = batch
+        # motion, style_idx = motion.to(self.device), style_idx.to(self.device)
+        # B, T     = motion.shape[0], motion.shape[1] // 4
+        # lengths  = torch.full((B,), T, device=motion.device, dtype=torch.long)
+        # len_mask = lengths_to_mask(lengths)
+        text1, motion1, m_lens1, style_label, text2, motion2, m_lens2, _ = batch
+        motion1 = motion1.to(self.device)
+        motion2 = motion2.to(self.device)
+        m_lens1 = m_lens1.to(self.device)
+        m_lens2 = m_lens2.to(self.device)
+        style_label = style_label.to(self.device)
 
         # Random drop for text
-        text = [
-            "" if np.random.rand(1) < self.config['text_drop'] else t for t in text
+        text1 = [
+            "" if np.random.rand(1) < self.config['text_drop'] else t for t in text1
+        ]
+        text2 = [
+            "" if np.random.rand(1) < self.config["text_drop"] else t for t in text2
         ]
 
         # Latent
+        len_mask1 = lengths_to_mask(m_lens1 // 4)
+        len_mask2 = lengths_to_mask(m_lens2 // 4)
         with torch.no_grad():
-            latent, _ = self.vae.encode(motion)
-            len_mask = F.pad(len_mask, (0, latent.shape[1] - len_mask.shape[1]), mode="constant", value=False)
-            latent = latent * len_mask[..., None, None].float()
+            latent1 = self.vae.encode(motion1)[0]
+            len_mask1 = F.pad(len_mask1, (0, latent1.shape[1] - len_mask1.shape[1]), mode="constant", value=False)
+            latent1 = latent1 * len_mask1[..., None, None].float()
+
+            latent2 = self.vae.encode(motion2)[0]
+            len_mask2 = F.pad(len_mask2, (0, latent2.shape[1] - len_mask2.shape[1]), mode="constant", value=False)
+            latent2 = latent2 * len_mask2[..., None, None].float()
 
         # Style embedding
-        style = self.style_encoder(latent)
+        style1 = self.style_encoder(latent1, len_mask1)
+        style2 = self.style_encoder(latent2, len_mask2)
         # idx = torch.arange(style.shape[0], device=style.device)
         # style = style[idx ^ 1]
 
@@ -109,35 +125,68 @@ class Text2StylizedMotion(nn.Module):
         timesteps = torch.randint(
             0,
             self.opt.num_train_timesteps,
-            (latent.shape[0],),
-            device=latent.device,
-        ).long()
+            (latent1.shape[0],),
+            device=latent1.device,
+            dtype=torch.long,
+        )
 
         # Add noise
-        noise = torch.randn_like(latent)
-        noise = noise * len_mask[..., None, None].float()
-        noisy_latent = self.scheduler.add_noise(latent, noise, timesteps)
+        noise1 = torch.randn_like(latent1)
+        noise1 = noise1 * len_mask1[..., None, None].float()
+        noisy_latent1 = self.scheduler.add_noise(latent1, noise1, timesteps)
+        
+        noise2 = torch.randn_like(latent2)
+        noise2 = noise2 * len_mask2[..., None, None].float()
+        noisy_latent2 = self.scheduler.add_noise(latent2, noise2, timesteps)
 
-        # Predict the noise
-        pred, attn_list = self.denoiser.forward(noisy_latent, timesteps, text, len_mask=len_mask, style=style)
-        pred = pred * len_mask[..., None, None].float()
+        # Prediction
+        input_latent = torch.cat([noisy_latent1, noisy_latent2, noisy_latent1, noisy_latent2], dim=0)
+        input_timesteps = torch.cat([timesteps, timesteps, timesteps, timesteps], dim=0)
+        input_text = text1 + text2 + text1 + text2
+        input_len_mask = torch.cat([len_mask1, len_mask2, len_mask1, len_mask2], dim=0)
+        input_style = torch.cat([style1, style2, style2, style1], dim=0)
+
+        pred, _ = self.denoiser.forward(input_latent, input_timesteps, input_text, input_len_mask, style=input_style)
+        pred_style, pred_content, pred_cycle1, pred_cycle2 = torch.split(pred, latent1.shape[0], dim=0)
+
+        pred_style   = pred_style * len_mask1[..., None, None].float()
+        pred_content = pred_content * len_mask2[..., None, None].float()
+        pred_cycle1  = pred_cycle1 * len_mask1[..., None, None].float()
+        pred_cycle2  = pred_cycle2 * len_mask2[..., None, None].float()
+
+        # pooled style
+        valid_tj = len_mask1[:, :, None].expand(len_mask1.size(0), len_mask1.size(1), style1.size(2))  # [B,T,J]
+        w = valid_tj.float()[..., None]                                                                 # [B,T,J,1]
+        num = (style1 * w).sum(dim=(1, 2))                                                             # [B, Ds]
+        den = w.sum(dim=(1, 2)).clamp_min(1e-5)                                                        # [B, 1]
+        pooled_style = num / den
 
         return {
-            "pred": pred,
-            "latent": latent,
-            "noise": noise,
+            "pred1": pred_style,
+            "pred2": pred_content,
+            "pred_cycle1": pred_cycle1,
+            "pred_cycle2": pred_cycle2,
+
+            "latent1": latent1,
+            "latent2": latent2,
             "timesteps": timesteps,
-            "style": style,
-            "style_idx": style_idx
+            "noise1": noise1,
+            "noise2": noise2,
+            
+            "style": pooled_style,
+            "style_idx": style_label,
+            # "content": style2,
         }
 
     @torch.no_grad()
     def style(self, batch):
-        motion, text, style_idx, content_idx = batch
-        motion, style_idx = motion.to(self.device), style_idx.to(self.device)
-        B, T     = motion.shape[0], motion.shape[1] // 4
-        lengths  = torch.full((B,), T, device=motion.device, dtype=torch.long)
-        len_mask = lengths_to_mask(lengths)
+        text, motion, m_lens, style_label, *_ = batch
+
+        motion = motion.to(self.device)
+        m_lens = m_lens.to(self.device)
+        style_label = style_label.to(self.device)
+
+        len_mask = lengths_to_mask(m_lens // 4)
 
         # Latent
         with torch.no_grad():
@@ -146,18 +195,27 @@ class Text2StylizedMotion(nn.Module):
             latent = latent * len_mask[..., None, None].float()
 
         # Style embedding
-        style = self.style_encoder(latent)
-        return style, style_idx
+        style_tokens = self.style_encoder(latent, len_mask)
+
+        # Masked mean over (T, J) → global style [B, Ds]
+        B, T, J, Ds = style_tokens.shape
+        valid_tj = len_mask[:, :, None].expand(B, T, J)       # [B,T,J], True=valid
+        w = valid_tj.float()[..., None]                        # [B,T,J,1]
+        num = (style_tokens * w).sum(dim=(1, 2))               # [B,Ds]
+        den = w.sum(dim=(1, 2)).clamp_min(1e-5)               # [B,1]
+        pooled_style = num / den  
+        return pooled_style, style_label
 
     @torch.no_grad()
-    def generate(self, motion, text, num_frames):
+    def generate(self, motion, text, lengths, style_lengths):
         motion = motion.to(self.device)
         B, T     = motion.shape[0], motion.shape[1] // 4
-        lengths  = torch.full((B,), T, device=motion.device, dtype=torch.long)
-        len_mask = lengths_to_mask(lengths)
+        # lengths  = torch.full((B,), T, device=motion.device, dtype=torch.long)
+        len_mask = lengths_to_mask(lengths // 4).to(self.device)
+        style_len_mask = lengths_to_mask(style_lengths // 4).to(self.device)
 
         # Input
-        z = torch.randn(B, num_frames // 4, 7, self.vae_opt.latent_dim).to(self.device, dtype=torch.float32)
+        z = torch.randn(B, lengths.max() // 4, 7, self.vae_opt.latent_dim).to(self.device, dtype=torch.float32)
         z = z * self.scheduler.init_noise_sigma
 
         # Set diffusion timesteps
@@ -166,76 +224,75 @@ class Text2StylizedMotion(nn.Module):
 
         # Motion latent
         latent, _ = self.vae.encode(motion)
-        # len_mask = F.pad(len_mask, (0, latent.shape[1] - len_mask.shape[1]), mode="constant", value=False)
-        # latent = latent * len_mask[..., None, None].float()
 
         # Style latent
-        style = self.style_encoder(latent)
-        idx = torch.arange(style.shape[0], device=style.device)
+        style = self.style_encoder(latent, style_len_mask)
+        # idx = torch.arange(style.shape[0], device=style.device)
         # style = style[idx ^ 1]
 
         # text = ["a person is walking forward"]*B
 
         # sa_weights, ta_weights, ca_weights = [], [], []
         for timestep in tqdm(timesteps, desc="Reverse diffusion"):
-            # pred_uncond, _ = self.denoiser.forward(z, timestep, [""]*B, len_mask=len_mask, need_attn=False)
-            # pred_text, _   = self.denoiser.forward(z, timestep, text, len_mask=len_mask, need_attn=True)
-            # pred_style, _  = self.denoiser.forward(z, timestep, text, len_mask=len_mask, need_attn=True, style=style)
-            pred_uncond, _ = self.denoiser.forward(z, timestep, [""]*B, need_attn=False)
-            pred_text, _   = self.denoiser.forward(z, timestep, text, need_attn=True)
-            pred_style, _  = self.denoiser.forward(z, timestep, text, need_attn=True, style=style)
-            pred = pred_uncond + self.config['text_weight'] * (pred_text - pred_uncond) + self.config['style_weight'] * (pred_style - pred_uncond)
-            # pred = pred_uncond + self.config['text_weight'] * (pred_text - pred_uncond) + self.config['style_weight'] * (pred_style - pred_text)
+            pred_uncond, _ = self.denoiser.forward(z, timestep, [""]*B, len_mask, need_attn=False, style=None)
+            pred_text, _   = self.denoiser.forward(z, timestep, text, len_mask, need_attn=False, style=None)
+            pred_style, _  = self.denoiser.forward(z, timestep, text, len_mask, need_attn=False, style=style)
+
+            # Ours
+            # pred = pred_uncond + self.config['text_weight'] * (pred_text - pred_uncond) + self.config['style_weight'] * (pred_style - pred_uncond)
+            # pred = pred_uncond + self.config['text_weight'] * (pred_text - pred_uncond)
+
+            # # SMooDi
+            pred = pred_uncond + self.config['text_weight'] * (pred_text - pred_uncond) + self.config['style_weight'] * (pred_style - pred_text)
+
             z = self.scheduler.step(pred, timestep, z).prev_sample
-            # sa_weights.append(sa)
-            # ta_weights.append(ta)
-            # ca_weights.append(ca)
 
         stylized_motion = self.vae.decode(z)
+        len_mask = lengths_to_mask(lengths).to(self.device)
+        stylized_motion = stylized_motion * len_mask[..., None].float()
         return stylized_motion, text
     
+    # @torch.no_grad()
+    # def generate2(self, motion, text, num_frames):
+    #     motion = motion.to(self.device)
+    #     B, T     = motion.shape[0], motion.shape[1] // 4
+    #     lengths  = torch.full((B,), T, device=motion.device, dtype=torch.long)
+    #     len_mask = lengths_to_mask(lengths)
 
-    @torch.no_grad()
-    def generate2(self, motion, text, num_frames):
-        motion = motion.to(self.device)
-        B, T     = motion.shape[0], motion.shape[1] // 4
-        lengths  = torch.full((B,), T, device=motion.device, dtype=torch.long)
-        len_mask = lengths_to_mask(lengths)
+    #     # Input
+    #     z = torch.randn(B, num_frames // 4, 7, self.vae_opt.latent_dim).to(self.device, dtype=torch.float32)
+    #     z = z * self.scheduler.init_noise_sigma
 
-        # Input
-        z = torch.randn(B, num_frames // 4, 7, self.vae_opt.latent_dim).to(self.device, dtype=torch.float32)
-        z = z * self.scheduler.init_noise_sigma
+    #     # Set diffusion timesteps
+    #     self.scheduler.set_timesteps(50)
+    #     timesteps = self.scheduler.timesteps.to(self.device)
 
-        # Set diffusion timesteps
-        self.scheduler.set_timesteps(50)
-        timesteps = self.scheduler.timesteps.to(self.device)
+    #     # Motion latent
+    #     latent, _ = self.vae.encode(motion)
+    #     # len_mask = F.pad(len_mask, (0, latent.shape[1] - len_mask.shape[1]), mode="constant", value=False)
+    #     # latent = latent * len_mask[..., None, None].float()
 
-        # Motion latent
-        latent, _ = self.vae.encode(motion)
-        # len_mask = F.pad(len_mask, (0, latent.shape[1] - len_mask.shape[1]), mode="constant", value=False)
-        # latent = latent * len_mask[..., None, None].float()
+    #     # Style latent
+    #     style = self.style_encoder(latent)
+    #     idx = torch.arange(style.shape[0], device=style.device)
+    #     # style = style[idx ^ 1]
 
-        # Style latent
-        style = self.style_encoder(latent)
-        idx = torch.arange(style.shape[0], device=style.device)
-        # style = style[idx ^ 1]
+    #     # text = ["a person is walking forward"]*B
 
-        # text = ["a person is walking forward"]*B
+    #     # sa_weights, ta_weights, ca_weights = [], [], []
+    #     for timestep in tqdm(timesteps, desc="Reverse diffusion"):
+    #         # pred_uncond, _ = self.denoiser.forward(z, timestep, [""]*B, len_mask=len_mask, need_attn=False)
+    #         # pred_text, _   = self.denoiser.forward(z, timestep, text, len_mask=len_mask, need_attn=True)
+    #         # pred_style, _  = self.denoiser.forward(z, timestep, text, len_mask=len_mask, need_attn=True, style=style)
+    #         pred_uncond, _ = self.denoiser.forward(z, timestep, [""]*B, need_attn=False)
+    #         pred_text, _   = self.denoiser.forward(z, timestep, text, need_attn=True)
+    #         pred_style, _  = self.denoiser.forward(z, timestep, text, need_attn=True, style=style)
+    #         # pred = pred_uncond + self.config['text_weight'] * (pred_text - pred_uncond) + self.config['style_weight'] * (pred_style - pred_uncond)
+    #         pred = pred_uncond + self.config['text_weight'] * (pred_text - pred_uncond) + self.config['style_weight'] * (pred_style - pred_text)
+    #         z = self.scheduler.step(pred, timestep, z).prev_sample
+    #         # sa_weights.append(sa)
+    #         # ta_weights.append(ta)
+    #         # ca_weights.append(ca)
 
-        # sa_weights, ta_weights, ca_weights = [], [], []
-        for timestep in tqdm(timesteps, desc="Reverse diffusion"):
-            # pred_uncond, _ = self.denoiser.forward(z, timestep, [""]*B, len_mask=len_mask, need_attn=False)
-            # pred_text, _   = self.denoiser.forward(z, timestep, text, len_mask=len_mask, need_attn=True)
-            # pred_style, _  = self.denoiser.forward(z, timestep, text, len_mask=len_mask, need_attn=True, style=style)
-            pred_uncond, _ = self.denoiser.forward(z, timestep, [""]*B, need_attn=False)
-            pred_text, _   = self.denoiser.forward(z, timestep, text, need_attn=True)
-            pred_style, _  = self.denoiser.forward(z, timestep, text, need_attn=True, style=style)
-            # pred = pred_uncond + self.config['text_weight'] * (pred_text - pred_uncond) + self.config['style_weight'] * (pred_style - pred_uncond)
-            pred = pred_uncond + self.config['text_weight'] * (pred_text - pred_uncond) + self.config['style_weight'] * (pred_style - pred_text)
-            z = self.scheduler.step(pred, timestep, z).prev_sample
-            # sa_weights.append(sa)
-            # ta_weights.append(ta)
-            # ca_weights.append(ca)
-
-        stylized_motion = self.vae.decode(z)
-        return stylized_motion, text
+    #     stylized_motion = self.vae.decode(z)
+    #     return stylized_motion, text

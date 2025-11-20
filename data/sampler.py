@@ -67,6 +67,107 @@ class TrainSampler(BatchSampler):
         return len(self.batches)
 
 
+class MixedSampler(BatchSampler):
+    """
+    Batch sampler that enforces style-aware batching on the 100STYLE half
+    of MixedTextStyleDataset. Works with dataset indexing contract:
+        __getitem__(item) uses idx_1 = pointer_1 + item  (100STYLE)
+    so we must emit 'item' in [0, len(name_list_1) - pointer_1).
+
+    Expects config:
+        - batch_size (int)
+        - samples_per_style (int)
+        - drop_last (optional, bool)
+        - seed (optional, int)
+    """
+    def __init__(self, config, dataset):
+        self.ds = dataset
+        self.B = int(config["batch_size"])
+        self.sps = int(config["samples_per_style"])
+        self.drop_last = bool(config.get("drop_last", False))
+        self.rng = random.Random(config.get("seed", 42))
+
+        # ---- Build 100STYLE “item” index space ----
+        # name_list_1/style_list_1 are aligned and sorted by length
+        # Valid 100STYLE indices are [pointer_1, len(name_list_1))
+        if not hasattr(dataset, "pointer_1"):
+            raise ValueError("Dataset missing pointer_1; call reset_max_len() before creating the sampler.")
+        p1 = int(dataset.pointer_1)
+        n1 = len(dataset.name_list_1)
+
+        if p1 >= n1:
+            raise ValueError("pointer_1 >= len(name_list_1): no 100STYLE samples available after length filtering.")
+
+        # Map: style_idx -> list of dataset “items” (item = global_idx - pointer_1)
+        self.styles_to_items = defaultdict(list)
+        for global_i in range(p1, n1):
+            style_idx = dataset.style_list_1[global_i]
+            item = global_i - p1
+            self.styles_to_items[style_idx].append(item)
+
+        # Keep only styles that actually have ≥1 sample
+        self.styles = [s for s, lst in self.styles_to_items.items() if len(lst) > 0]
+        if not self.styles:
+            raise ValueError("No 100STYLE styles available for batching.")
+
+        # Flat pool for top-ups (all valid “item” indices)
+        self.all_items = []
+        for s in self.styles:
+            self.all_items.extend(self.styles_to_items[s])
+
+        # Precompute an approximate epoch length
+        # (we use the total 100STYLE available; DataLoader will stop at len(self))
+        total = len(self.all_items)
+        self._num_batches = total // self.B if self.drop_last else math.ceil(total / self.B)
+
+        # Prepare first epoch
+        self._make_epoch_batches()
+
+    def _choose_styles_for_batch(self, styles_per_batch):
+        # Sample styles without replacement if we can; otherwise with replacement
+        if styles_per_batch <= len(self.styles):
+            return self.rng.sample(self.styles, styles_per_batch)
+        return [self.rng.choice(self.styles) for _ in range(styles_per_batch)]
+
+    def _take_sps(self, style_idx, k):
+        """Take k items from this style bucket; with replacement if bucket < k."""
+        pool = self.styles_to_items[style_idx]
+        if len(pool) >= k:
+            # sample without replacement
+            return self.rng.sample(pool, k)
+        # with replacement
+        return [self.rng.choice(pool) for _ in range(k)]
+
+    def _make_epoch_batches(self):
+        self.batches = []
+        B, sps = self.B, self.sps
+        styles_per_batch = max(1, B // max(1, sps))
+
+        for _ in range(self._num_batches):
+            selected_styles = self._choose_styles_for_batch(styles_per_batch)
+
+            batch = []
+            for s in selected_styles:
+                batch.extend(self._take_sps(s, sps))
+
+            # Trim or top-up to exact batch size using the full 100STYLE pool
+            if len(batch) > B:
+                batch = batch[:B]
+            elif len(batch) < B:
+                batch.extend(self.rng.choices(self.all_items, k=B - len(batch)))
+
+            self.batches.append(batch)
+
+    def __iter__(self):
+        # Rebuild and reshuffle every epoch to avoid staleness
+        self._make_epoch_batches()
+        self.rng.shuffle(self.batches)
+        return iter(self.batches)
+
+    def __len__(self):
+        return self._num_batches
+
+
 # class TrainSampler(BatchSampler):
 #     def __init__(self, config, dataset):
 #         self.config = config
@@ -426,4 +527,5 @@ SAMPLER_REGISTRY = {
     "TwoStyleSampler": TwoStyleSampler,
     "StyleContentSampler": StyleContentSampler,
     "RandomStyleSampler": RandomStyleSampler,
+    "MixedSampler": MixedSampler,
 }

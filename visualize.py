@@ -233,10 +233,6 @@ if __name__ == "__main__":
     B = config['sampler']['batch_size'] if 'sampler' in config else 16
     loader = DataLoader(Subset(ds_style, indices), batch_size=B, shuffle=True, num_workers=0)
 
-    # # --- Output dir --- #
-    # output_dir = os.path.join(config["result_dir"], "stylized")
-    # reset_dir(output_dir)
-
     # --- Output dir --- #
     # Put videos under: result_dir/stylized/<style_weight>/
     style_weight = config["model"].get("style_weight", None)
@@ -256,16 +252,18 @@ if __name__ == "__main__":
     std  = torch.tensor(np.load(style_cfg["std_path"]),  dtype=torch.float32, device=device)
 
     # --- One batch ---
-    (cap1, win1, len1, sty1) = next(iter(loader))      # captions, (B,T,D), lengths, style_idx
-    motions = win1.to(device)                           # normalized
-    captions = list(cap1)                               # list[str]
+    (cap1, win1, len1, sty1) = next(iter(loader)) # captions, (B,T,D), lengths, style_idx
+    motions = win1.to(device)                     # normalized
+    captions = list(cap1)                         # list[str]
 
     # Optional: pair/mismatch like your old code (swap every other item)
-    idx = torch.arange(motions.shape[0], device=motions.device)
-    motions_swapped = motions[idx ^ 1]
+    # idx = torch.arange(motions.shape[0], device=motions.device)
+    # motions_swapped = motions[idx ^ 1]
+
+    captions = ["a person walks forward and sits down"]*32
 
     # --- Generate stylized (uses your existing signature) ---
-    stylized, captions_out = model.generate(motions_swapped, captions, len1, len1)
+    stylized, captions_out = model.generate(motions, captions, len1, len1)
 
     # --- Denormalize stylized & reference (reference = input before swap, like before) ---
     stylized  = stylized * std + mean
@@ -292,6 +290,6 @@ if __name__ == "__main__":
             joints_b=joints_reference[i],
             titles=(f"{style_name} — {cap}", "Reference"),
             figsize=(12, 6),
-            fps=20,
+            fps=20, 
             radius=4.0,
         )

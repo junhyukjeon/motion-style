@@ -115,35 +115,19 @@ def load_model(config, device):
 
 
 def main():
-    # ------------------------------------------------------------
-    # Setup: device, config, seed, model
-    # ------------------------------------------------------------
-
-    # Use GPU if available, otherwise CPU
+    # Setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Load YAML config and CLI overrides
     config = load_config()
-
-    # Fix randomness
     set_seed(config["random_seed"])
-
-    # Load model
     model = load_model(config, device)
 
-    # ------------------------------------------------------------
-    # Dataset: 100STYLE
-    # ------------------------------------------------------------
 
-    # Pull the style dataset config block (paths, JSON, etc.)
     style_cfg = config['dataset_style']
 
     # style_cfg["style_json"] should map style name -> list of motion IDs.
     # e.g., {"Angry_angry": ["030001", "030002", ...], ...}
     with open(style_cfg["style_json"], "r", encoding="utf-8") as f:
         styles_to_ids = json.load(f)
-
-    import pdb; pdb.set_trace()
 
     # Sorted list of style names (so index order is consistent)
     all_styles = sorted(styles_to_ids.keys())

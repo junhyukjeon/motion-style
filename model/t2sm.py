@@ -227,8 +227,6 @@ class Text2StylizedMotion(nn.Module):
 
         # Style latent
         style = self.style_encoder(latent, style_len_mask)
-        # idx = torch.arange(style.shape[0], device=style.device)
-        # style = style[idx ^ 1]
 
         # text = ["a person is walking forward"]*B
 

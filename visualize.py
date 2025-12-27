@@ -220,7 +220,7 @@ if __name__ == "__main__":
     ds_style = Dataset100Style(style_cfg, styles=all_styles, train=False)
 
     # Pick a target style index and subset to only those items
-    target_style_idx = 0
+    target_style_idx = 81
     if target_style_idx not in ds_style.style_idx_to_style:
         raise ValueError(f"target_style_idx={target_style_idx} not in dataset.")
 
@@ -230,7 +230,8 @@ if __name__ == "__main__":
 
     # Build a DataLoader over that subset
     from torch.utils.data import Subset
-    B = config['sampler']['batch_size'] if 'sampler' in config else 16
+    # B = config['sampler']['batch_size'] if 'sampler' in config else 16
+    B = 16
     loader = DataLoader(Subset(ds_style, indices), batch_size=B, shuffle=True, num_workers=0)
 
     # --- Output dir --- #
@@ -260,7 +261,7 @@ if __name__ == "__main__":
     # idx = torch.arange(motions.shape[0], device=motions.device)
     # motions_swapped = motions[idx ^ 1]
 
-    captions = ["a person walks forward and sits down"]*32
+    captions = ["a person runs forward"]*B
 
     # --- Generate stylized (uses your existing signature) ---
     stylized, captions_out = model.generate(motions, captions, len1, len1)
@@ -278,7 +279,28 @@ if __name__ == "__main__":
                     [9, 13, 16, 18, 20]]
 
     style_name = ds_style.style_idx_to_style[target_style_idx]
+    # for i in tqdm(range(stylized.size(0)), desc="Rendering videos", leave=False):
+    #     cap = captions_out[i] if isinstance(captions_out, (list, tuple)) else str(captions_out[i])
+    #     cap = slug(cap)
+    #     save_path = os.path.join(output_dir, f"{cap}_{i}.mp4")
+
+    #     plot_pair_3d_motion(
+    #         save_path=save_path,
+    #         kinematic_tree=kinematic_tree,
+    #         joints_a=joints_stylized[i],
+    #         joints_b=joints_reference[i],
+    #         titles=(f"{style_name} — {cap}", "Reference"),
+    #         figsize=(12, 6),
+    #         fps=20, 
+    #         radius=4.0,
+    #     )
+    lengths = len1.cpu().numpy().astype(int)  # (B,)
+
     for i in tqdm(range(stylized.size(0)), desc="Rendering videos", leave=False):
+        L = lengths[i]
+        if L <= 0:
+            continue
+
         cap = captions_out[i] if isinstance(captions_out, (list, tuple)) else str(captions_out[i])
         cap = slug(cap)
         save_path = os.path.join(output_dir, f"{cap}_{i}.mp4")
@@ -286,10 +308,10 @@ if __name__ == "__main__":
         plot_pair_3d_motion(
             save_path=save_path,
             kinematic_tree=kinematic_tree,
-            joints_a=joints_stylized[i],
-            joints_b=joints_reference[i],
+            joints_a=joints_stylized[i][:L],      # <-- trim to length
+            joints_b=joints_reference[i][:L],     # <-- trim to length
             titles=(f"{style_name} — {cap}", "Reference"),
             figsize=(12, 6),
-            fps=20, 
+            fps=20,
             radius=4.0,
         )

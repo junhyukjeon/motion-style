@@ -40,7 +40,7 @@ class StyleTransformer(nn.Module):
             nn.Linear(style_dim, style_dim),
         )
 
-        self.query = nn.Parameter(torch.randn(1, config['num_queries'], style_dim) / (style_dim ** 0.5)) 
+        self.query = nn.Parameter(torch.randn(1, 1, style_dim) / (style_dim ** 0.5)) 
         
         self.blocks = nn.ModuleList([
             CrossAttentionBlock(config["block"])
@@ -84,13 +84,31 @@ class StyleMLP(nn.Module):
             nn.Linear(style_dim, style_dim),
         )
 
-    def forward(self, x, mask):
-        B, T, J, C = x.shape
-        style = self.mlp(x)
+    def forward(self, x, mask=None):
+        B, T, J, C = x.shape                  # x: [B, T, J, C]
+        style = self.mlp(x)                   # [B, T, J, D]
+
         if mask is not None:
-            style = style.masked_fill(~mask[:, :, None, None], 0.0)
-        return style
+            # mask: [B, T]  → repeat for joints & dim
+            valid = mask[:, :, None, None]    # [B, T, 1, 1]
+            style = style * valid.float()     # zero out invalid tokens
+
+            # pooling only over valid frames
+            num = style.sum(dim=(1, 2))       # [B, D]
+            den = valid.sum(dim=(1, 2)).clamp(min=1e-5)  # [B, 1]
+            pooled = num / den                # [B, D]
+        else:
+            # simple mean pooling if no mask
+            pooled = style.mean(dim=(1, 2))   # [B, D]
+        return pooled
     
+    # def forward(self, x, mask):
+    #     B, T, J, C = x.shape
+    #     style = self.mlp(x)
+    #     if mask is not None:
+    #         style = style.masked_fill(~mask[:, :, None, None], 0.0)
+    #     return style  
+
 
 # --- Axial Style Encoder --- #
 class AxialSelfAttentionBlock(nn.Module):

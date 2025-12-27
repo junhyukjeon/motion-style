@@ -45,40 +45,38 @@ class HyperLoRA(nn.Module):
         nn.init.zeros_(self.head_B[-1].bias)
 
     def forward(self, style, len_mask=None):
-        """
-        style:    (B, T, J, D_style)  -- same as StyleLoRA input
-        len_mask: (B, T) boolean, True = valid timestep, or None
+        B, D = style.shape
+        x = self.project(style)
+        hA = x
+        hB = x
+        A  = self.head_A(hA).view(B, self.rank, self.in_dim)
+        Bm = self.head_B(hB).view(B, self.out_dim, self.rank)
+        # B, T, J, D = style.shape
+        # assert D == self.style_dim, f"Expected last dim {self.style_dim}, got {D}"
 
-        Returns:
-            A:  (B, R, in_dim)
-            Bm: (B, out_dim, R)
-        """
-        B, T, J, D = style.shape
-        assert D == self.style_dim, f"Expected last dim {self.style_dim}, got {D}"
+        # # Per-token projection
+        # x = self.project(style)  # (B, T, J, style_dim)
 
-        # Per-token projection
-        x = self.project(style)  # (B, T, J, style_dim)
+        # # Masked pooling → single global style vector per sample
+        # if len_mask is not None:
+        #     # len_mask: True = valid (B, T)
+        #     mask_4d = len_mask[:, :, None, None]  # (B, T, 1, 1)
+        #     x = x * mask_4d  # zero out padded timesteps
 
-        # Masked pooling → single global style vector per sample
-        if len_mask is not None:
-            # len_mask: True = valid (B, T)
-            mask_4d = len_mask[:, :, None, None]  # (B, T, 1, 1)
-            x = x * mask_4d  # zero out padded timesteps
+        #     # number of valid (t,j) positions per batch element
+        #     valid_counts = (len_mask.sum(dim=1, keepdim=True) * J).clamp(min=1)  # (B, 1)
+        #     # sum over time and joints, then normalize
+        #     pooled = x.sum(dim=(1, 2)) / valid_counts  # (B, style_dim)
+        # else:
+        #     # Simple mean over all tokens if no mask
+        #     pooled = x.mean(dim=(1, 2))  # (B, style_dim)
 
-            # number of valid (t,j) positions per batch element
-            valid_counts = (len_mask.sum(dim=1, keepdim=True) * J).clamp(min=1)  # (B, 1)
-            # sum over time and joints, then normalize
-            pooled = x.sum(dim=(1, 2)) / valid_counts  # (B, style_dim)
-        else:
-            # Simple mean over all tokens if no mask
-            pooled = x.mean(dim=(1, 2))  # (B, style_dim)
+        # # Map pooled style to LoRA factors
+        # hA = pooled
+        # hB = pooled
 
-        # Map pooled style to LoRA factors
-        hA = pooled
-        hB = pooled
-
-        A  = self.head_A(hA).view(B, self.rank, self.in_dim)   # (B, R, in_dim)
-        Bm = self.head_B(hB).view(B, self.out_dim, self.rank)  # (B, out_dim, R)
+        # A  = self.head_A(hA).view(B, self.rank, self.in_dim)   # (B, R, in_dim)
+        # Bm = self.head_B(hB).view(B, self.out_dim, self.rank)  # (B, out_dim, R)
         return A, Bm
 
 

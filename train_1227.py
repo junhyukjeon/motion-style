@@ -41,15 +41,13 @@ def load_config():
     with cfg_path.open('r') as f:
         config = yaml.safe_load(f)
 
-    # run_name = the path inside "configs/" without the .yaml suffix
-    # e.g., configs/loss/0.yaml  ->  run_name="loss/0"
     parts = cfg_path.parts
     if "configs" in parts:
         i = parts.index("configs")
-        sub = Path(*parts[i+1:]).with_suffix("")   # loss/0 (Path)
-        run_name = str(sub).replace("\\", "/")     # normalize on Windows just in case
+        sub = Path(*parts[i+1:]).with_suffix("")
+        run_name = str(sub).replace("\\", "/")
     else:
-        run_name = cfg_path.stem                   # fallback
+        run_name = cfg_path.stem
 
     config["run_name"] = run_name
 
@@ -74,29 +72,40 @@ if __name__ == "__main__":
     with open(style_cfg["style_json"]) as f:
         styles_to_ids = json.load(f)
     all_styles = sorted(styles_to_ids.keys())
-    # train_styles, valid_styles = train_test_split(styles_sorted, test_size=config['valid_size'], random_state=config["random_seed"])
 
-    def read_ids(p):
-        with open(p, "r", encoding="utf-8") as f:
-            return [ln.strip() for ln in f if ln.strip()]
-    ids_train = read_ids("./dataset/100style/train_random_100style.txt")
-    ids_valid = read_ids("./dataset/100style/valid_random_100style.txt")
+    #############################################################################################
+    train_styles, valid_styles = train_test_split(all_styles, test_size=config['valid_size'], random_state=config["random_seed"])
+    style_train = Dataset100Style(style_cfg, styles=train_styles, train=True)
+    style_valid = Dataset100Style(style_cfg, styles=valid_styles, train=False)
+
+    sampler_cfg = config['sampler']
+    train_sampler = SAMPLER_REGISTRY[sampler_cfg['type']](sampler_cfg, style_train)
+    valid_sampler = SAMPLER_REGISTRY[sampler_cfg['type']](sampler_cfg, style_valid)
+    train_loader_style  = DataLoader(style_train, batch_sampler=train_sampler)
+    valid_loader_style  = DataLoader(style_valid, batch_sampler=valid_sampler)
+
+    #############################################################################################
+    # def read_ids(p):
+    #     with open(p, "r", encoding="utf-8") as f:
+    #         return [ln.strip() for ln in f if ln.strip()]
+    # ids_train = read_ids("./dataset/100style/train_random_100style.txt")
+    # ids_valid = read_ids("./dataset/100style/valid_random_100style.txt")
 
     # --- Dataset & Loader --- #
-    # train_dataset = TextStyleDataset(dataset_cfg, train_styles)
-    # valid_dataset = TextStyleDataset(dataset_cfg, valid_styles)
-    style_train = Dataset100Style(style_cfg, styles=all_styles, train=True,  use_ids=ids_train)
-    style_valid = Dataset100Style(style_cfg, styles=all_styles, train=False, use_ids=ids_valid)
+    # style_train = Dataset100Style(style_cfg, styles=all_styles, train=True,  use_ids=ids_train)
+    # style_valid = Dataset100Style(style_cfg, styles=all_styles, train=False, use_ids=ids_valid)
+
+    # sampler_cfg = config['sampler']
+    # import pdb; pdb.set_trace()
+    # train_sampler = SAMPLER_REGISTRY[sampler_cfg['type']](sampler_cfg, style_train)
+    # valid_sampler = SAMPLER_REGISTRY[sampler_cfg['type']](sampler_cfg, style_valid)
+    # train_loader_style  = DataLoader(style_train, batch_size=sampler_cfg["batch_size"], shuffle=True, drop_last=True)
+    # valid_loader_style  = DataLoader(style_valid, batch_size=sampler_cfg["batch_size"], shuffle=False, drop_last=True)
+    #############################################################################################
 
     hml_cfg = config['dataset_hml']
     hml_train = DatasetHumanML3D(hml_cfg, train=True)
     hml_valid = DatasetHumanML3D(hml_cfg, train=False)
-
-    sampler_cfg = config['sampler']
-    # train_sampler = SAMPLER_REGISTRY[sampler_cfg['type']](sampler_cfg, style_train)
-    # valid_sampler = SAMPLER_REGISTRY[sampler_cfg['type']](sampler_cfg, style_valid)
-    train_loader_style  = DataLoader(style_train, batch_size=sampler_cfg["batch_size"], shuffle=True, drop_last=True)
-    valid_loader_style  = DataLoader(style_valid, batch_size=sampler_cfg["batch_size"], shuffle=False, drop_last=True)
     train_loader_hml    = DataLoader(hml_train, batch_size=sampler_cfg["batch_size"], shuffle=True, drop_last=True)
     valid_loader_hml    = DataLoader(hml_valid, batch_size=sampler_cfg["batch_size"], shuffle=False, drop_last=True)
 
@@ -113,6 +122,10 @@ if __name__ == "__main__":
     # --- Losses & Scaler --- #
     loss_cfg = config['loss']
     loss_fns = {name: LOSS_REGISTRY[name] for name in loss_cfg}
+    normalize_flags = {
+        name: loss_cfg[name].get("normalize", True)
+        for name in loss_cfg
+    }
 
     # --- Early Stopper --- #
     early_cfg = config['early']
@@ -151,11 +164,17 @@ if __name__ == "__main__":
         n += 1
 
         for name, val in losses.items():
-            sum_sq[name] += float(val.detach().cpu()) ** 2
+            if normalize_flags[name]:
+                sum_sq[name] += float(val.detach().cpu()) ** 2
 
-    for name, s2 in sum_sq.items():
-        rms = (s2 / max(1, n)) ** 0.5
-        scales[name] = max(rms, config['tau'])
+    for name in loss_cfg.keys():
+        if normalize_flags[name]:
+            s2  = sum_sq[name]
+            rms = (s2 / max(1, n)) ** 0.5
+            scales[name] = max(rms, config['tau'])
+        else:
+            # no normalization for this loss; act as regularizer
+            scales[name] = 1.0
     print("📏 Frozen RMS denominators:", {k: round(v, 6) for k, v in scales.items()})
 
     # --- Training --- #
@@ -275,6 +294,6 @@ if __name__ == "__main__":
                 torch.save(sd_trainable, os.path.join(config["checkpoint_dir"], "best.ckpt"))
 
             if early.step(val_total_scaled, epoch):
-                print(f"⏹️ Early stopping at epoch {epoch} "
+                print(f"⏹️ Early stopping at epoch {epoch}"
                     f"(best task={early.best:.4f} at epoch {early.best_epoch})")
                 break

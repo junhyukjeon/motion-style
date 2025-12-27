@@ -172,7 +172,8 @@ class SmoodiEval():
         self.label_to_motion = build_dict_from_txt("./dataset/100style/100STYLE_name_dict_Filter.txt")
 
         # metrics
-        self.metrics = TM2TMetrics().to(device)
+        # self.metrics = TM2TMetrics().to(device)
+        self.metrics = TM2TMetrics()
 
         # evaluation models
         self.text_enc, self.motion_enc, self.movement_enc = build_evaluators({
@@ -240,6 +241,7 @@ class SmoodiEval():
         )
 
     def t2m_eval(self, batch):
+        # with torch.inference_mode():
         texts = batch["text"]
         motions = batch["motion"].detach().clone().cuda()
         lengths = torch.tensor(batch["length"]).detach().clone().cuda()
@@ -289,24 +291,44 @@ class SmoodiEval():
         motion_emb = self.motion_enc(motion_mov, lengths)
         text_emb = self.text_enc(word_embs, pos_ohot, text_lengths)[align_idx]
 
+        lat_t   = text_emb.detach().cpu()
+        lat_m   = motion_emb.detach().cpu()
+        lat_rm  = recons_emb.detach().cpu()
+        joints_rst_cpu = joints_rst.detach().cpu()
+        logits_cpu     = logits.detach().cpu()
+        label_cpu      = label.detach().cpu()
+        lengths_cpu    = lengths.detach().cpu()
+
         return {
-            "m_ref": motions,
-            "m_rst": feats_rst,
-            "lat_t": text_emb,
-            "lat_m": motion_emb,
-            "lat_rm": recons_emb,
-            "joints_ref": joints_ref,
-            "joints_rst": joints_rst,
-            "predicted": logits,
-            "label": label,
+            "lat_t": lat_t,
+            "lat_m": lat_m,
+            "lat_rm": lat_rm,
+            "joints_rst": joints_rst_cpu,
+            "predicted": logits_cpu,
+            "label": label_cpu,
             "inference_time": end - start,
-            "length": lengths,
+            "length": lengths_cpu,
         }
 
+        # return {
+        #     "m_ref": motions,
+        #     "m_rst": feats_rst,
+        #     "lat_t": text_emb,
+        #     "lat_m": motion_emb,
+        #     "lat_rm": recons_emb,
+        #     "joints_ref": joints_ref,
+        #     "joints_rst": joints_rst,
+        #     "predicted": logits,
+        #     "label": label,
+        #     "inference_time": end - start,
+        #     "length": lengths,
+        # }
+
     def evaluate(self):
+        # with torch.inference_mode():
         for i, batch in enumerate(tqdm(self.data_loader, desc="Evaluating")):
             # batch = [word_embeddings, pos_one_hots, caption, sent_len, motion, m_length, tokens, caption2, sent_len2, label, style_text]
-            torch.cuda.empty_cache()
+            # torch.cuda.empty_cache()
 
             res = self.t2m_eval(batch)
             self.metrics.update(
@@ -319,6 +341,10 @@ class SmoodiEval():
                 res["joints_rst"],
                 res["inference_time"],
             )
+
+            del res
+            torch.cuda.empty_cache()
+
             if i % 10 == 0 and i > 0:
                 print(f"Batch {i}:")
                 self.compute_metrics()
@@ -342,6 +368,8 @@ def load_config():
     parser.add_argument('--config', type=str, required=True, help='Path to config file (YAML)')
     parser.add_argument('--style_weight', type=float, default=None,
                         help='Override config.model.style_weight at runtime')
+    parser.add_argument('--style_guidance', type=float, default=None,
+                        help='Override config.model.style_guidance at runtime')
     parser.add_argument('--csv_name', type=str, default=None,
                         help='CSV filename to write results to (e.g., metrics_style0.5.csv)')
     args = parser.parse_args()
@@ -360,7 +388,7 @@ def load_config():
     else:
         run_name = cfg_path.stem
 
-    config["run_name"] = run_name
+    config["run_name"]       = run_name
     config["result_dir"]     = os.path.join(config["result_dir"], run_name)
     config["checkpoint_dir"] = os.path.join(config["checkpoint_dir"], run_name)
 
@@ -368,6 +396,11 @@ def load_config():
         if "model" not in config or not isinstance(config["model"], dict):
             config["model"] = {}
         config["model"]["style_weight"] = args.style_weight
+
+    if args.style_guidance is not None:
+        if "model" not in config or not isinstance(config["model"], dict):
+            config["model"] = {}
+        config["model"]["style_guidance"] = args.style_guidance
 
     if args.csv_name is not None:
         config["csv_name"] = args.csv_name  # store for use later
@@ -392,44 +425,44 @@ if __name__ == "__main__":
     # config = load_config(args.config)
     config = load_config()
 
-    # import pdb; pdb.set_trace()
-
     set_seed(config["random_seed"])
-    with torch.no_grad():
-        evaluator = SmoodiEval(config)
-        evaluator.evaluate()
-        metrics = evaluator.compute_metrics()
+    evaluator = SmoodiEval(config)
+    evaluator.evaluate()
+    metrics = evaluator.compute_metrics()
 
-        # Write csv
-        import csv
+    # Write csv
+    import csv
 
-        # Get style_weight from config (None if not set)
-        style_weight = None
-        if "model" in config and isinstance(config["model"], dict):
-            style_weight = config["model"].get("style_weight", None)
+    # Get style_weight from config (None if not set)
+    style_weight = None
+    style_guidance = None
+    if "model" in config and isinstance(config["model"], dict):
+        style_weight   = config["model"].get("style_weight", None)
+        style_guidance = config["model"].get("style_guidance", None)
 
-        row = {
-            "run": config["run_name"],
-            "style_weight": style_weight,
-        }
+    row = {
+        "run": config["run_name"],
+        "style_weight": style_weight,
+        "style_guidance": style_guidance,
+    }
 
-        for k, v in metrics.items():
-            if isinstance(v, torch.Tensor):
-                v = v.item()
-            elif isinstance(v, np.ndarray):
-                v = float(v)
-            row[k] = v
+    for k, v in metrics.items():
+        if isinstance(v, torch.Tensor):
+            v = v.item()
+        elif isinstance(v, np.ndarray):
+            v = float(v)
+        row[k] = v
 
-        csv_dir  = "./evaluation"
-        csv_name = config.get("csv_name", "metrics.csv")
-        csv_file = os.path.join(csv_dir, csv_name)
-        os.makedirs(csv_dir, exist_ok=True)
-        exists = os.path.isfile(csv_file)
+    csv_dir  = "./evaluation"
+    csv_name = config.get("csv_name", "metrics.csv")
+    csv_file = os.path.join(csv_dir, csv_name)
+    os.makedirs(csv_dir, exist_ok=True)
+    exists = os.path.isfile(csv_file)
 
-        fieldnames = ["run", "style_weight"] + list(metrics.keys())
+    fieldnames = ["run", "style_weight", "style_guidance"] + list(metrics.keys())
 
-        with open(csv_file, "a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            if not exists:
-                writer.writeheader()
-            writer.writerow(row)
+    with open(csv_file, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not exists:
+            writer.writeheader()
+        writer.writerow(row)

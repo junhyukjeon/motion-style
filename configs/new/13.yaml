@@ -1,4 +1,3 @@
-# This one is FiLM instead of LoRA into SALAD's cross attention.
 # --- Run Management --- #
 run_name: auto
 result_dir: ./results
@@ -31,8 +30,8 @@ dataset_hml:
 # --- Sampler Settings --- #
 sampler:
   type: TrainSampler
-  batch_size: 32
-  # samples_per_style: 4
+  batch_size: 64
+  samples_per_style: 4
 
 # --- Model --- #
 model:
@@ -42,7 +41,7 @@ model:
         attention: {}
         film:
           lora:
-            type: StyleLoRA
+            type: HyperLoRA
             rank: 8
             scale: 1.0
             style_dim: 256
@@ -75,10 +74,12 @@ model:
 loss:
   style: 
     weight: 1.0
-  # content:
-  #   weight: 1.0
-  cycle:
+  cycle_style:
     weight: 1.0
+    normalize: false
+  cycle_hml:
+    weight: 1.0
+    normalize: false
   supcon:
     weight: 1.0
     temperature: 0.07
@@ -94,6 +95,6 @@ steps: 34
 tau: 0.001
 
 # --- Training --- #
-epochs: 300
-lr: 0.0002
-valid_size: 0.0
+epochs: 500
+lr: 0.0001
+valid_size: 0.2

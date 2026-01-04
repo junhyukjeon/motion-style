@@ -1,1 +1,1 @@
-python train_new.py --config ./configs/new/17.yaml
+python train_new.py --config ./configs/new/22.yaml

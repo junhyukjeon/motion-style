@@ -122,14 +122,12 @@ def plot_3d_motion(save_path, kinematic_tree, joints, title, dataset, figsize=(3
         ax.set_yticks([])
         ax.set_zticks([])
 
-
         return mplfig_to_npimage(fig)
 
     ani = VideoClip(update)
     
     plt.close()
     return ani
-
 
 
 def plot_3d_motion_with_trajectories(save_path, kinematic_tree, joints, title, dataset, figsize=(3, 3), fps=120, radius=3,
@@ -297,7 +295,6 @@ def explicit_plot_3d_motion(save_path, kinematic_tree, joints, title, dataset, f
             plot_root()
         for feat in painting_features:
             plot_feature(feat)
-            
 
         plt.axis('off')
         ax.set_axis_off()
@@ -312,7 +309,6 @@ def explicit_plot_3d_motion(save_path, kinematic_tree, joints, title, dataset, f
         ax.set_xticks([])
         ax.set_yticks([])
         ax.set_zticks([])
-
 
         return mplfig_to_npimage(fig)
 

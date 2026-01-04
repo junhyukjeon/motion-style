@@ -1,1 +1,0 @@
-python train.py --config ./configs/new/13.yaml

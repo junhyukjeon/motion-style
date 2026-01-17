@@ -69,7 +69,8 @@ model:
   text_drop: 0.1
   style_drop: 0.1
   text_weight: 7.5
-  style_weight: 4.5
+  style_weight: 1.5
+  style_guidance: 1
 
 # --- Losses --- #
 loss:

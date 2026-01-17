@@ -40,6 +40,11 @@ class StyleTransformer(nn.Module):
             nn.Linear(style_dim, style_dim),
         )
 
+        self.pos_T = PositionalEmbedding(style_dim, dropout=0.0)
+        self.pos_J = nn.Embedding(7, style_dim)
+        self.register_buffer("j_index", torch.arange(7), persistent=False)
+        nn.init.trunc_normal_(self.pos_J.weight, std=0.02)
+
         self.query = nn.Parameter(torch.randn(1, 1, style_dim) / (style_dim ** 0.5)) 
         
         self.blocks = nn.ModuleList([
@@ -57,14 +62,20 @@ class StyleTransformer(nn.Module):
     def forward(self, x, mask=None):
         B, T, J, _ = x.shape
         x = self.project(x)
+
+        x = x + self.pos_J(self.j_index[:J])[None, None, :, :]
         x = x.reshape(B, T * J, x.shape[-1])
+        x = self.pos_T(x)
+
+        tok_mask = None
         if mask is not None:
-            mask = torch.repeat_interleave(mask, J, dim=1)
+            tok_mask = torch.repeat_interleave(mask, J, dim=1)  # [B, T*J], True=valid
+
         query = self.query.expand(B, -1, -1)
         for block in self.blocks:
-            query = block(query, x, mask=mask)
-        style = query.mean(dim=1)
-        style = self.head(style)
+            query = block(query, x, mask=tok_mask)
+
+        style = self.head(query[:, 0])
         return style
 
 
@@ -101,13 +112,6 @@ class StyleMLP(nn.Module):
             # simple mean pooling if no mask
             pooled = style.mean(dim=(1, 2))   # [B, D]
         return pooled
-    
-    # def forward(self, x, mask):
-    #     B, T, J, C = x.shape
-    #     style = self.mlp(x)
-    #     if mask is not None:
-    #         style = style.masked_fill(~mask[:, :, None, None], 0.0)
-    #     return style  
 
 
 # --- Axial Style Encoder --- #

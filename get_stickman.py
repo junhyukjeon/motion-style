@@ -85,7 +85,7 @@ def load_config():
     config["run_name"] = run_name
 
     # results/loss/0  and  checkpoints/loss/0
-    config["result_dir"]     = os.path.join(config["result_dir"], "test")
+    config["result_dir"]     = os.path.join(config["result_dir"], os.path.basename(run_name))
     config["checkpoint_dir"] = os.path.join(config["checkpoint_dir"], run_name)
     return config
 
@@ -176,13 +176,18 @@ if __name__ == "__main__":
     if style_guidance is not None:
         tag_parts.append(fmt_tag("g", style_guidance))
 
-    if tag_parts:
-        # e.g. "w1p5_g3p0"
-        style_tag = "_".join(tag_parts)
-        output_dir = os.path.join(config["result_dir"], style_tag)
-    else:
-        # fallback if neither is defined
-        output_dir = os.path.join(config["result_dir"], "stylized")
+    style_name = None
+    with open("./dataset/100style/key_indices.txt", "r", encoding="utf-8") as f:
+        for line in f:
+            if ":" not in line:
+                continue
+            idx, name = line.split(":", 1)
+            if int(idx.strip()) == target_style_idx:
+                style_name = name.strip().lower()
+                break
+
+    style_tag = "_".join(tag_parts)
+    output_dir = os.path.join(config["result_dir"], style_name, style_tag)
     reset_dir(output_dir)
 
     # --- Mean & Std (tensors on device) --- #
@@ -194,7 +199,7 @@ if __name__ == "__main__":
     motions = win1.to(device)                     # normalized
     captions = list(cap1)                         # list[str]
 
-    captions = ["a person walks forward and sits down"]*B
+    captions = ["a person is walking forward"]*B
 
     # --- Generate stylized (uses your existing signature) ---
     stylized, captions_out = model.generate(motions, captions, len1, len1)

@@ -286,6 +286,8 @@ class TM2TMetrics(Metric):
 
 
     def compute(self, sanity_flag=False):
+        self.Matching_score.zero_()
+        self.gt_Matching_score.zero_()
         count = self.count.item()
         count_seq = self.count_seq.item()
 

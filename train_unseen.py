@@ -67,6 +67,18 @@ if __name__ == "__main__":
     os.makedirs(os.path.join(config["result_dir"], "valid"), exist_ok=True)
     writer = SummaryWriter(log_dir=os.path.join("./results/tensorboard", config["run_name"]))
 
+    # --- Load predefined style split file ---
+    style_split_path = "./dataset/100style/100STYLE_name_dict_Filter.txt"
+    styles_in_file = set()
+    with open(style_split_path, "r") as f:
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) < 2:
+                continue
+            bvh_name = parts[1]                 # Aeroplane_BR_00.bvh
+            style = bvh_name.split("_")[0]      # Aeroplane
+            styles_in_file.add(style)
+
     # --- Style Split --- #
     style_cfg = config['dataset_style']
     with open(style_cfg["style_json"]) as f:
@@ -74,7 +86,13 @@ if __name__ == "__main__":
     all_styles = sorted(styles_to_ids.keys())
 
     #############################################################################################
-    train_styles, valid_styles = train_test_split(all_styles, test_size=config['valid_size'], random_state=config["random_seed"])
+    # train_styles, valid_styles = train_test_split(all_styles, test_size=config['valid_size'], random_state=config["random_seed"])
+    valid_styles = sorted([s for s in all_styles if s in styles_in_file])
+    train_styles = sorted([s for s in all_styles if s not in styles_in_file])
+
+    print(f"# Train styles: {len(train_styles)}")
+    print(f"# Valid styles: {len(valid_styles)}")
+
     style_train = Dataset100Style(style_cfg, styles=train_styles, train=True)
     style_valid = Dataset100Style(style_cfg, styles=valid_styles, train=False)
 
@@ -91,12 +109,11 @@ if __name__ == "__main__":
     # ids_train = read_ids("./dataset/100style/train_random_100style.txt")
     # ids_valid = read_ids("./dataset/100style/valid_random_100style.txt")
 
-    # --- Dataset & Loader --- #
+    # # --- Dataset & Loader --- #
     # style_train = Dataset100Style(style_cfg, styles=all_styles, train=True,  use_ids=ids_train)
     # style_valid = Dataset100Style(style_cfg, styles=all_styles, train=False, use_ids=ids_valid)
 
     # sampler_cfg = config['sampler']
-    # import pdb; pdb.set_trace()
     # train_sampler = SAMPLER_REGISTRY[sampler_cfg['type']](sampler_cfg, style_train)
     # valid_sampler = SAMPLER_REGISTRY[sampler_cfg['type']](sampler_cfg, style_valid)
     # train_loader_style  = DataLoader(style_train, batch_size=sampler_cfg["batch_size"], shuffle=True, drop_last=True)
@@ -139,33 +156,53 @@ if __name__ == "__main__":
     n = 0
     for i, (b_style, b_hml) in enumerate(pbar):
         if i >= config['steps']: break
-
         cap1, win1, len1, sty1 = b_style
         cap2, win2, len2, sty2 = b_hml
         batch = (cap1, win1, len1, sty1, cap2, win2, len2, sty2)
-        optimizer.zero_grad(set_to_none=True)
+        # optimizer.zero_grad(set_to_none=True)
         with autocast(dtype=amp_dtype, enabled=torch.cuda.is_available()):
             out = model(batch)
             losses = {}
+            losses_denoiser = {}
             for name, fn in loss_fns.items():
                 spec = loss_cfg[name]
                 raw  = fn(spec, model, out)
-                losses[name] = raw
-
-            total_loss = None
+                if "cycle" in name:
+                    losses_denoiser[name] = raw
+                else:
+                    losses[name] = raw
+            total_loss = torch.zeros((), device=device)
+            total_loss_denoiser = torch.zeros((), device=device)
             for name, val in losses.items():
-                scaled     = loss_cfg[name]['weight'] * val
-                total_loss = scaled if total_loss is None else total_loss + scaled
+                total_loss += loss_cfg[name]["weight"] * val
+            for name, val in losses_denoiser.items():
+                total_loss_denoiser += loss_cfg[name]["weight"] * val
 
-        total_loss.backward()
-        optimizer.step()
+        # total_loss.backward(retain_graph=True)
 
-        pbar.set_postfix(loss=float(total_loss.item()))
+        # if total_loss_denoiser != 0.0:
+        #     enc_req = [p.requires_grad for p in model.style_encoder.parameters()]
+        #     for p in model.style_encoder.parameters():
+        #         p.requires_grad_(False)
+        #     try:
+        #         total_loss_denoiser.backward()
+        #     finally:
+        #         for p, r in zip(model.style_encoder.parameters(), enc_req):
+        #             p.requires_grad_(r)
+
+        # optimizer.step()
+
+        all_losses = {}
+        all_losses.update(losses)
+        all_losses.update(losses_denoiser)
+
+        for name, val in all_losses.items():
+            if normalize_flags.get(name, False):
+                v = val.detach().float().item()
+                sum_sq[name] += v * v
+
         n += 1
-
-        for name, val in losses.items():
-            if normalize_flags[name]:
-                sum_sq[name] += float(val.detach().cpu()) ** 2
+        pbar.set_postfix(loss=float(total_loss.item()))
 
     for name in loss_cfg.keys():
         if normalize_flags[name]:
@@ -173,7 +210,6 @@ if __name__ == "__main__":
             rms = (s2 / max(1, n)) ** 0.5
             scales[name] = max(rms, config['tau'])
         else:
-            # no normalization for this loss; act as regularizer
             scales[name] = 1.0
     print("📏 Frozen RMS denominators:", {k: round(v, 6) for k, v in scales.items()})
 
@@ -185,8 +221,9 @@ if __name__ == "__main__":
         losses_scaled_sum = defaultdict(float)
         losses_norm_sum   = defaultdict(float)
         losses_raw_sum    = defaultdict(float)
-
-        pbar = tqdm(zip(train_loader_style, train_loader_hml), total=len(train_loader_style), desc=f"[Train] Epoch {epoch}")
+        pbar = tqdm(zip(train_loader_style, train_loader_hml),
+                    total=len(train_loader_style),
+                    desc=f"[Train] Epoch {epoch}")
         batch_idx = -1
         for batch_idx, (b_style, b_hml) in enumerate(pbar):
             cap1, win1, len1, sty1 = b_style
@@ -195,18 +232,38 @@ if __name__ == "__main__":
             optimizer.zero_grad(set_to_none=True)
             with autocast(dtype=amp_dtype, enabled=torch.cuda.is_available()):
                 out = model(batch)
+                total_loss = torch.zeros((), device=device)         # non-cycle (updates BOTH)
+                total_loss_cycle = torch.zeros((), device=device)   # cycle (denoiser-only)
                 losses = {}
-                total_loss = 0.0
                 for name, fn in loss_fns.items():
                     spec   = loss_cfg[name]
                     raw    = fn(spec, model, out)
                     norm   = raw / scales[name]
-                    scaled = norm * spec['weight']
+                    scaled = norm * spec["weight"]
                     losses[name] = (scaled, norm, raw)
-                    total_loss = total_loss + scaled
-            total_loss.backward()
+                    if "cycle" in name:
+                        total_loss_cycle = total_loss_cycle + scaled
+                    else:
+                        total_loss = total_loss + scaled
+
+            # 1) Backprop non-cycle losses (updates BOTH denoiser + style_encoder)
+            total_loss.backward(retain_graph=True)
+
+            # 2) Backprop cycle losses (updates DENOISER ONLY)
+            if len([k for k in losses.keys() if "cycle" in k]) > 0:
+                enc_req = [p.requires_grad for p in model.style_encoder.parameters()]
+                for p in model.style_encoder.parameters():
+                    p.requires_grad_(False)
+                try:
+                    total_loss_cycle.backward()
+                finally:
+                    for p, r in zip(model.style_encoder.parameters(), enc_req):
+                        p.requires_grad_(r)
+
             optimizer.step()
-            pbar.set_postfix(loss=float(total_loss.item()))
+
+            pbar.set_postfix(loss=float((total_loss + total_loss_cycle).item()))
+
             for name, (scaled, norm, raw) in losses.items():
                 losses_scaled_sum[name] += scaled.item()
                 losses_norm_sum[name]   += norm.item()
@@ -240,16 +297,20 @@ if __name__ == "__main__":
                 cap2, win2, len2, sty2 = b_hml
                 batch = (cap1, win1, len1, sty1, cap2, win2, len2, sty2)
                 out = model(batch)
+                total_loss = torch.zeros((), device=device)
+                total_loss_cycle = torch.zeros((), device=device)
                 losses = {}
-                total_loss = 0.0
                 for name, fn in loss_fns.items():
                     spec   = loss_cfg[name]
                     raw    = fn(spec, model, out)
                     norm   = raw / scales[name]
-                    scaled = norm * spec['weight']
+                    scaled = norm * spec["weight"]
                     losses[name] = (scaled, norm, raw)
-                    total_loss = total_loss + scaled
-                pbar.set_postfix(loss=float(total_loss.item()))
+                    if "cycle" in name:
+                        total_loss_cycle = total_loss_cycle + scaled
+                    else:
+                        total_loss = total_loss + scaled
+                pbar.set_postfix(loss=float((total_loss + total_loss_cycle).item()))
                 for name, (scaled, norm, raw) in losses.items():
                     losses_scaled_sum[name] += scaled.item()
                     losses_norm_sum[name]   += norm.item()

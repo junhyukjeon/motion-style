@@ -42,7 +42,7 @@ model:
         film:
           lora:
             type: HyperLoRA
-            rank: 8
+            rank: 4
             scale: 1.0
             style_dim: 256
             num_layers: 4
@@ -75,14 +75,6 @@ model:
 loss:
   style: 
     weight: 1.0
-  # hml:
-  #   weight: 0.5
-  # cycle_style:
-  #   weight: 1.0
-  #   normalize: false
-  # cycle_hml:
-  #   weight: 1.0
-  #   normalize: false
   supcon:
     weight: 1.0
     temperature: 0.07

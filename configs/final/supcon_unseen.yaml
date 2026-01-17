@@ -75,17 +75,9 @@ model:
 loss:
   style: 
     weight: 1.0
-  # hml:
-  #   weight: 0.5
-  # cycle_style:
+  # supcon:
   #   weight: 1.0
-  #   normalize: false
-  # cycle_hml:
-  #   weight: 1.0
-  #   normalize: false
-  supcon:
-    weight: 1.0
-    temperature: 0.07
+  #   temperature: 0.07
 
 # --- Early Stopper --- #
 early:

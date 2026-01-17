@@ -55,7 +55,7 @@ model:
               hidden_dim: 512
               num_heads: 8
   style_encoder:
-    type: StyleMLP
+    type: StyleTransformer
     dropout: 0.1
     style_dim: 256
     num_layers: 4

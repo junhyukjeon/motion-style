@@ -128,7 +128,7 @@ class Text2StylizedMotion(nn.Module):
         style1 = self.pool_style(style1, len_mask1)
         idx = torch.arange(len(style1))
         idx = (idx ^ 1)
-        style1 = style1[idx]
+        style_swapped = style1[idx]
 
         # Sample diffusion timesteps
         timesteps = torch.randint(
@@ -154,7 +154,7 @@ class Text2StylizedMotion(nn.Module):
         input_timesteps = torch.cat([timesteps, timesteps], dim=0)
         input_text = text1 + text2
         input_len_mask = torch.cat([len_mask1, len_mask2], dim=0)
-        input_style = torch.cat([style1, style1], dim=0)
+        input_style = torch.cat([style_swapped, style_swapped], dim=0)
 
         pred, _ = self.denoiser.forward(
             input_latent,
@@ -183,14 +183,6 @@ class Text2StylizedMotion(nn.Module):
         )
         x0_hml = x0_hml * len_mask2[..., None, None].float()
 
-        # # pooled style
-        # if style1.dim() == 4:
-        #     valid_tj = len_mask1[:, :, None].expand(len_mask1.size(0), len_mask1.size(1), style1.size(2)) # [B,T,J]
-        #     w = valid_tj.float()[..., None]                                                               # [B,T,J,1]
-        #     num = (style1 * w).sum(dim=(1, 2))                                                            # [B, Ds]
-        #     den = w.sum(dim=(1, 2)).clamp_min(1e-5)                                                       # [B, 1]
-        #     style1 = num / den
-
         return {
             "pred1": pred_style,       # 100STYLE text + 100STYLE motion
             "pred2": pred_hml,         # HumanML3D text + 100STYLE motion
@@ -203,7 +195,8 @@ class Text2StylizedMotion(nn.Module):
             "noise2": noise2,
             "style": style1,          # For supcon loss
             "style_idx": style_label, # For supcon loss
-            # "content": style2,
+            "len_mask1": len_mask1,
+            "len_mask2": len_mask2,
         }
 
     @torch.no_grad()
@@ -266,8 +259,8 @@ class Text2StylizedMotion(nn.Module):
             pred_style, _  = self.denoiser.forward(z_in, timestep, text, len_mask, need_attn=False, style=style)
             v_pred = pred_uncond + self.config['text_weight']  * (pred_text  - pred_uncond) + self.config['style_weight'] * (pred_style - pred_text)
 
-            # Get grad
-            grad, style_loss = self.style_guidance(
+            # z_guidance
+            grad_z, style_loss = self.style_guidance(
                 z=z_in,
                 v_pred=v_pred,
                 timestep=timestep,
@@ -277,12 +270,27 @@ class Text2StylizedMotion(nn.Module):
                 normalize_grad=True,
             )
 
-            # Inject guidance (minimize style loss)
-            z_in_guided = z_in - grad
-
-            # Diffusion step with v_guided
+            z_guided = z_in - grad_z
             with torch.no_grad():
-                z = self.scheduler.step(v_pred.detach(), timestep, z_in_guided).prev_sample
+                z = self.scheduler.step(v_pred.detach(), timestep, z_guided.detach()).prev_sample
+
+            # v_guidance
+            # grad_v, style_loss = self.style_guidance(
+            #     z=z_in,
+            #     v_pred=v_pred,
+            #     timestep=timestep,
+            #     len_mask=len_mask,
+            #     style_target=style,
+            #     guidance_scale=self.config.get("style_guidance", 0.1),
+            #     normalize_grad=True,
+            # )
+
+            # # Inject guidance (minimize style loss)
+            # v_guided = v_pred - grad_v
+
+            # # Diffusion step with v_guided
+            # with torch.no_grad():
+            #     z = self.scheduler.step(v_guided.detach(), timestep, z_in).prev_sample
 
         stylized_motion = self.vae.decode(z)
         len_mask = lengths_to_mask(lengths).to(self.device)
@@ -291,14 +299,11 @@ class Text2StylizedMotion(nn.Module):
     
     def style_guidance(self, z, v_pred, timestep, len_mask, style_target, guidance_scale=1.0, normalize_grad=True, eps=1e-6):
         B = z.shape[0]
-        t_b = timestep
-        if not torch.is_tensor(t_b):
-            t_b = torch.tensor(t_b, device=self.device, dtype=torch.long)
-        if t_b.dim() == 0:
-            t_b = t_b.expand(B)
+        t_b = timestep.expand(B)
+        v_const = v_pred.detach()
 
         # predict x0
-        x0_hat = self._recover_x0_from_v(z, v_pred, t_b)
+        x0_hat = self._recover_x0_from_v(z, v_const, t_b)
         x0_hat = x0_hat * len_mask[..., None, None].float()
 
         style = self.style_encoder(x0_hat, len_mask)
@@ -308,27 +313,16 @@ class Text2StylizedMotion(nn.Module):
         loss = F.mse_loss(style, style_target, reduction="mean")
         # or cosine:
         # loss = (1.0 - F.cosine_similarity(style, style_target, dim=-1)).mean()
+        # print(loss)
 
         # gradient wrt z
         grad_raw = torch.autograd.grad(loss, z, retain_graph=False, create_graph=False)[0]
         grad = grad_raw
 
-        # print(loss)
-
         if normalize_grad:
-            # per-sample normalize to avoid exploding scale across steps
             g = grad.view(B, -1)
             g_norm = torch.norm(g, dim=1, keepdim=True).clamp_min(eps)
             grad = (g / g_norm).view_as(grad)
-
-        # # 🔍 DIAGNOSTIC PRINT (here)
-        # with torch.no_grad():
-        #     print(
-        #         "||grad|| (raw):",
-        #         grad_raw.view(B, -1).norm(dim=1).mean().item(),
-        #         "||guidance step||:",
-        #         (guidance_scale * grad).view(B, -1).norm(dim=1).mean().item(),
-        #     )
 
         return guidance_scale * grad, loss.detach()
     

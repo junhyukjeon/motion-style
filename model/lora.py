@@ -38,7 +38,7 @@ class HyperLoRA(nn.Module):
             nn.Linear(self.style_dim, self.out_dim * self.rank),
         )
 
-        # Init like your StyleLoRA
+        # Initialization
         nn.init.kaiming_uniform_(self.head_A[-1].weight, a=math.sqrt(5))
         nn.init.zeros_(self.head_A[-1].bias)
         nn.init.zeros_(self.head_B[-1].weight)

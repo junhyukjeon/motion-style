@@ -1,3 +1,4 @@
+# Q and O
 # --- Run Management --- #
 run_name: auto
 result_dir: ./results
@@ -31,15 +32,14 @@ dataset_hml:
 sampler:
   type: TrainSampler
   batch_size: 64
-  samples_per_style: 4
+  samples_per_style: 8
 
 # --- Model --- #
 model:
   denoiser:
     transformer:
       layer:
-        attention: {}
-        film:
+        attention:
           lora:
             type: HyperLoRA
             rank: 8
@@ -47,15 +47,15 @@ model:
             style_dim: 256
             num_layers: 4
             in_dim: 256
-            out_dim: 512
-            hidden_dim: 512
+            out_dim: 256
             block:
               dropout: 0.1
               style_dim: 256
               hidden_dim: 512
               num_heads: 8
+        film: {}
   style_encoder:
-    type: StyleMLP
+    type: StyleTransformer
     dropout: 0.1
     style_dim: 256
     num_layers: 4
@@ -75,14 +75,6 @@ model:
 loss:
   style: 
     weight: 1.0
-  # hml:
-  #   weight: 0.5
-  # cycle_style:
-  #   weight: 1.0
-  #   normalize: false
-  # cycle_hml:
-  #   weight: 1.0
-  #   normalize: false
   supcon:
     weight: 1.0
     temperature: 0.07
@@ -99,5 +91,5 @@ tau: 0.001
 
 # --- Training --- #
 epochs: 500
-lr: 0.0001
+lr: 0.00005
 valid_size: 0.2

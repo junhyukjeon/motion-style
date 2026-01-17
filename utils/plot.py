@@ -40,7 +40,7 @@ def plot_tsne(model, loader, device, epoch=None, title="valid", result_dir="", l
         print("❌ No valid samples collected for t-SNE!")
         return
 
-    embeddings_np = torch.cat(all_embeddings).numpy()
+    embeddings_np = torch.cat(all_embeddings).detach().float().cpu().numpy()
     labels_np = torch.cat(all_labels).numpy()
 
     print(f"[t-SNE] Running 3D t-SNE on {len(embeddings_np)} samples...")
@@ -124,7 +124,7 @@ def plot_tsne_mix(model, loader, device, epoch=None, title="valid", result_dir="
     if not all_labels:
         print("❌ No valid samples collected for t-SNE!")
         return
-
+    
     embeddings_np = torch.cat(all_embeddings).numpy()
     labels_np = torch.cat(all_labels).numpy()
 

@@ -53,9 +53,9 @@ class MultiheadAttention(nn.Module):
         dropout,
         batch_first=True,
         use_lora=False,
-        lora_q=True,
-        lora_v=True,
-        lora_o=True,
+        lora_q=False,
+        lora_v=False,
+        lora_o=False,
     ):
         super(MultiheadAttention, self).__init__()
         self.Wq = nn.Linear(d_model, d_model)
@@ -210,7 +210,7 @@ class STTransformerLayer(nn.Module):
         # skeletal attention
         self.skel_attn = MultiheadAttention(
             config["attention"], opt.latent_dim, opt.n_heads, opt.dropout,
-            batch_first=True, use_lora=True, lora_q=True, lora_v=True, lora_o=False
+            batch_first=True, use_lora=False, lora_q=False, lora_v=False, lora_o=False
         )
         self.skel_norm = nn.LayerNorm(opt.latent_dim)
         self.skel_dropout = nn.Dropout(opt.dropout)
@@ -218,7 +218,7 @@ class STTransformerLayer(nn.Module):
         # temporal attention
         self.temp_attn = MultiheadAttention(
             config["attention"], opt.latent_dim, opt.n_heads, opt.dropout,
-            batch_first=True, use_lora=True, lora_q=True, lora_v=True, lora_o=False
+            batch_first=True, use_lora=False, lora_q=False, lora_v=False, lora_o=False
         )
         self.temp_norm = nn.LayerNorm(opt.latent_dim)
         self.temp_dropout = nn.Dropout(opt.dropout)
@@ -226,7 +226,7 @@ class STTransformerLayer(nn.Module):
         # cross attention
         self.cross_attn = MultiheadAttention(
             config["attention"], opt.latent_dim, opt.n_heads, opt.dropout,
-            batch_first=True, use_lora=True, lora_q=True, lora_v=True, lora_o=False
+            batch_first=True, use_lora=False, lora_q=False, lora_v=False, lora_o=False
         )
         self.cross_src_norm = nn.LayerNorm(opt.latent_dim)
         self.cross_tgt_norm = nn.LayerNorm(opt.latent_dim)

@@ -38,6 +38,7 @@ def load_denoiser(config, opt, vae_dim):
     state = torch.load(pjoin(opt.checkpoints_dir, opt.dataset_name, opt.name, 'model', 'net_best_fid.tar'),
                             map_location='cpu')
     missing_keys, unexpected_keys = denoiser.load_state_dict(state["denoiser"], strict=False)
+
     for p in denoiser.parameters():
         p.requires_grad = False
 
@@ -51,8 +52,21 @@ def load_denoiser(config, opt, vae_dim):
         elif n in missing_set:
             p.requires_grad = True
 
-    n_train = sum(p.numel() for p in denoiser.parameters() if p.requires_grad)
-    n_total = sum(p.numel() for p in denoiser.parameters())
+    def is_clip(n):
+        return n.startswith("clip_model.")
+
+    n_train = sum(
+        p.numel() for n, p in denoiser.named_parameters()
+        if p.requires_grad and not is_clip(n)
+    )
+
+    n_total = sum(
+        p.numel() for n, p in denoiser.named_parameters()
+        if not is_clip(n)
+    )
+
+    # n_train = sum(p.numel() for p in denoiser.parameters() if p.requires_grad)
+    # n_total = sum(p.numel() for p in denoiser.parameters())
     print(f"Trainable params in denoiser: {n_train}/{n_total}")
     return denoiser
 

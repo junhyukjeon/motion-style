@@ -4,6 +4,34 @@ import torch.nn as nn
 import torch.nn.functional as F
 from salad.models.denoiser.transformer import MultiheadAttention
 
+# class HyperLoRA(nn.Module):
+#     def __init__(self, config):
+#         super().__init__()
+#         self.rank      = config["rank"]
+#         self.scale     = config["scale"]
+#         self.style_dim = config["style_dim"]
+#         self.in_dim    = config["in_dim"]
+#         self.out_dim   = config["out_dim"]
+
+#         self.norm = nn.LayerNorm(self.style_dim)
+#         self.head_A = nn.Linear(self.style_dim, self.rank * self.in_dim)
+#         self.head_B = nn.Linear(self.style_dim, self.out_dim * self.rank)
+
+#         # near-zero init
+#         with torch.no_grad():
+#             self.head_A.weight.normal_(0, 1e-4)
+#             self.head_A.bias.zero_()
+#             self.head_B.weight.normal_(0, 1e-4)
+#             self.head_B.bias.zero_()
+
+#     def forward(self, style, len_mask=None):
+#         B, D = style.shape
+#         x = self.norm(style)
+#         r = self.rank
+#         A  = self.head_A(x).reshape(B, r, self.in_dim)      # (B, r, in_dim)
+#         Bm = self.head_B(x).reshape(B, self.out_dim, r)     # (B, out_dim, r)
+#         return A, Bm
+
 
 class HyperLoRA(nn.Module):
     def __init__(self, config):

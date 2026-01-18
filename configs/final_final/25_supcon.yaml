@@ -42,7 +42,7 @@ model:
         film:
           lora:
             type: HyperLoRA
-            rank: 8
+            rank: 2
             scale: 1.0
             style_dim: 256
             num_layers: 4
@@ -90,6 +90,6 @@ steps: 34
 tau: 0.001
 
 # --- Training --- #
-epochs: 500
+epochs: 100
 lr: 0.0001
 valid_size: 0.75

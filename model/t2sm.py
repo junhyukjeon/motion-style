@@ -288,24 +288,6 @@ class Text2StylizedMotion(nn.Module):
             with torch.no_grad():
                 z = self.scheduler.step(v_pred.detach(), timestep, z_guided.detach()).prev_sample
 
-            # v_guidance
-            # grad_v, style_loss = self.style_guidance(
-            #     z=z_in,
-            #     v_pred=v_pred,
-            #     timestep=timestep,
-            #     len_mask=len_mask,
-            #     style_target=style,
-            #     guidance_scale=self.config.get("style_guidance", 0.1),
-            #     normalize_grad=True,
-            # )
-
-            # # Inject guidance (minimize style loss)
-            # v_guided = v_pred - grad_v
-
-            # # Diffusion step with v_guided
-            # with torch.no_grad():
-            #     z = self.scheduler.step(v_guided.detach(), timestep, z_in).prev_sample
-
         stylized_motion = self.vae.decode(z)
         len_mask = lengths_to_mask(lengths).to(self.device)
         stylized_motion = stylized_motion * len_mask[..., None].float()

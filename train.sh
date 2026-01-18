@@ -1,5 +1,5 @@
-python train.py --config ./configs/final/ours.yaml
-python train.py --config ./configs/final/supcon.yaml
-python train.py --config ./configs/final/rank1.yaml
-python train.py --config ./configs/final/rank2.yaml
-python train.py --config ./configs/final/rank4.yaml
+python train_final_final.py --config ./configs/final_final/ours.yaml
+python train_final_final.py --config ./configs/final_final/ours_supcon.yaml
+
+python train_final_final_unseen.py --config ./configs/final_final/25.yaml
+python train_final_final_unseen.py --config ./configs/final_final/25_supcon.yaml

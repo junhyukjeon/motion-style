@@ -109,12 +109,6 @@ def _preprocess_motion(joints):
     d[..., 2] -= d[:, 0:1, 2]
     return d, mn, mx, traj, d.shape[0]
 
-def find_index_by_motion_id(ds_style, motion_id: str) -> int:
-    motion_id = str(motion_id)
-    for i, it in enumerate(ds_style.items):
-        if it["motion_id"] == motion_id:
-            return i
-    raise ValueError(f"motion_id='{motion_id}' not found in dataset.")
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -139,7 +133,20 @@ if __name__ == "__main__":
     # 100STYLE dataset (eval mode so center-crop is used)
     ds_style = Dataset100Style(style_cfg, styles=all_styles, train=False)
 
+    # Pick a target style index and subset to only those items
+    target_style_idx = 3
+    if target_style_idx not in ds_style.style_idx_to_style:
+        raise ValueError(f"target_style_idx={target_style_idx} not in dataset.")
+
+    indices = [i for i, it in enumerate(ds_style.items) if it["style_idx"] == target_style_idx]
+    if len(indices) == 0:
+        raise RuntimeError(f"No items found for style_idx={target_style_idx} ({ds_style.style_idx_to_style[target_style_idx]}).")
+
+    # Build a DataLoader over that subset
+    from torch.utils.data import Subset
+    # B = config['sampler']['batch_size'] if 'sampler' in config else 16
     B = 16
+    loader = DataLoader(Subset(ds_style, indices), batch_size=B, shuffle=True, num_workers=0)
 
     # --- Output dir --- #
     style_weight = config["model"].get("style_weight", None)
@@ -169,10 +176,17 @@ if __name__ == "__main__":
     if style_guidance is not None:
         tag_parts.append(fmt_tag("g", style_guidance))
 
-    REF_MOTION_ID = "031611"
-    style_name = REF_MOTION_ID
+    style_name = None
+    with open("./dataset/100style/key_indices.txt", "r", encoding="utf-8") as f:
+        for line in f:
+            if ":" not in line:
+                continue
+            idx, name = line.split(":", 1)
+            if int(idx.strip()) == target_style_idx:
+                style_name = name.strip().lower()
+                break
 
-    style_tag = "_".join(tag_parts) if len(tag_parts) > 0 else "default"
+    style_tag = "_".join(tag_parts)
     output_dir = os.path.join(config["result_dir"], style_name, style_tag)
     reset_dir(output_dir)
 
@@ -180,54 +194,32 @@ if __name__ == "__main__":
     mean = torch.tensor(np.load(style_cfg["mean_path"]), dtype=torch.float32, device=device)
     std  = torch.tensor(np.load(style_cfg["std_path"]),  dtype=torch.float32, device=device)
 
-    # --- Pick reference motion by ID ---
-    ref_i = find_index_by_motion_id(ds_style, REF_MOTION_ID)
+    # --- One batch ---
+    (cap1, win1, len1, sty1) = next(iter(loader)) # captions, (B,T,D), lengths, style_idx
+    motions = win1.to(device)                     # normalized
+    captions = list(cap1)                         # list[str]
 
-    cap, win, L, sty = ds_style[ref_i]
-    win = win[:L]
-    motions  = win.unsqueeze(0).to(device)          # (1, T, D) normalized
-    len1     = torch.tensor([L], dtype=torch.long)  # (1,)
-    captions = ["a person walks in a circle"]        # or [cap]
+    captions = ["a person runs in a circle"]*B
 
-    # Repeat reference to B samples
-    motions  = motions.repeat(B, 1, 1)              # (B, T, D)
-    len1     = len1.repeat(B)                       # (B,)
-    captions = captions * B                         # (B,)
-
-    # --- Generate stylized ---
+    # --- Generate stylized (uses your existing signature) ---
     stylized, captions_out = model.generate(motions, captions, len1, len1)
 
-    # --- Denormalize stylized & reference ---
+    # --- Denormalize stylized & reference (reference = input before swap, like before) ---
     stylized  = stylized * std + mean
     reference = motions * std + mean
 
-    # --- Recover joints ---
+    # --- Recover joints and render ---
     joints_stylized  = recover_from_ric(stylized, 22).detach().cpu().numpy()
     joints_reference = recover_from_ric(reference, 22).detach().cpu().numpy()
 
-    # --- Kinematic tree (define once) ---
     kinematic_tree = [[0, 2, 5, 8, 11], [0, 1, 4, 7, 10],
-                      [0, 3, 6, 9, 12, 15], [9, 14, 17, 19, 21],
-                      [9, 13, 16, 18, 20]]
+                    [0, 3, 6, 9, 12, 15], [9, 14, 17, 19, 21],
+                    [9, 13, 16, 18, 20]]
 
-    # --- Render reference ONCE (since it's identical for all batch entries) ---
-    L_ref = int(len1[0].item())
-    xyz_ref = joints_reference[0][:L_ref].astype(np.float32)  # (L_ref, 22, 3)
-
-    ref_path = os.path.join(output_dir, "sample00_rep00.mp4")
-    plot_3d_motion(
-        ref_path,
-        kinematic_tree,
-        xyz_ref,
-        title="",
-        dataset="humanml",
-        fps=20,
-    )
-
-    # --- Prepare saving arrays ---
+    style_name = ds_style.style_idx_to_style[target_style_idx]
     lengths = len1.cpu().numpy().astype(int)
 
-    num_samples = B                  # total videos = B (sample00 is ref, sample01.. are generated)
+    num_samples = B
     num_repetitions = 1
     N = num_samples * num_repetitions
 
@@ -236,29 +228,23 @@ if __name__ == "__main__":
 
     all_motions = np.zeros((N, J, 3, T_max), dtype=np.float32)
     all_lengths = lengths.astype(np.int32)
+    all_text = [str(captions_out[i]) for i in range(B)]
 
-    # sample00 text can be anything; keep empty or mark as reference
-    all_text = ["[REF]"] + [str(captions_out[i]) for i in range(1, B)]
-
-    # --- Fill sample00 (reference) into results.npy ---
-    all_motions[0, :, :, :L_ref] = np.transpose(xyz_ref, (1, 2, 0))
-    all_lengths[0] = L_ref
-
-    # --- Render generated from sample01..sample(B-1) and fill results.npy ---
-    for sample_i in range(1, B):
+    for sample_i in range(B):
         L = int(all_lengths[sample_i])
-        xyz_gen = joints_stylized[sample_i][:L].astype(np.float32)  # (L, 22, 3)
+        xyz = joints_stylized[sample_i][:L].astype(np.float32)  # (L,22,3)
 
         # fill as (J,3,T)
-        all_motions[sample_i, :, :, :L] = np.transpose(xyz_gen, (1, 2, 0))
+        all_motions[sample_i, :, :, :L] = np.transpose(xyz, (1, 2, 0))
 
-        gen_file = f"sample{sample_i:02d}_rep{0:02d}.mp4"
-        gen_path = os.path.join(output_dir, gen_file)
+        save_file = f"sample{sample_i:02d}_rep{0:02d}.mp4"
+        animation_save_path = os.path.join(output_dir, save_file)
+
         plot_3d_motion(
-            gen_path,
+            animation_save_path,
             kinematic_tree,
-            xyz_gen,
-            title="",
+            xyz,                     # (L,22,3) for plotting
+            title=all_text[sample_i],
             dataset="humanml",
             fps=20,
         )

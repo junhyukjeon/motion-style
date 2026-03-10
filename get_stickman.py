@@ -61,9 +61,34 @@ def slug(s: str, maxlen: int = 60) -> str:
     s = "_".join(s.split())  # spaces -> underscores
     return (s[:maxlen]).rstrip("_")
 
+import re
+def verb_after_person(caption: str, fallback: str = "unknown") -> str:
+    if not caption:
+        return fallback
+
+    s = caption.strip().lower()
+
+    # remove trailing punctuation
+    s = re.sub(r"[^\w\s]", "", s)
+
+    tokens = s.split()
+    if not tokens:
+        return fallback
+
+    # walk backwards to find a valid word
+    for tok in reversed(tokens):
+        if tok.isalpha():
+            return slug(tok, maxlen=24)
+
+    return fallback
+
 def load_config():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, required=True, help='Path to config file (YAML)')
+    parser.add_argument('--ref_motion_id', type=str, default="030303",
+                        help='Reference motion ID (default: 030303)')
+    parser.add_argument('--caption', type=str, default=None,
+                        help='Caption text for generation (default: dataset caption)')
     args = parser.parse_args()
 
     from pathlib import Path
@@ -77,16 +102,21 @@ def load_config():
     parts = cfg_path.parts
     if "configs" in parts:
         i = parts.index("configs")
-        sub = Path(*parts[i+1:]).with_suffix("")   # loss/0 (Path)
-        run_name = str(sub).replace("\\", "/")     # normalize on Windows just in case
+        sub = Path(*parts[i+1:]).with_suffix("")
+        run_name = str(sub).replace("\\", "/")
     else:
-        run_name = cfg_path.stem                   # fallback
+        run_name = cfg_path.stem
 
     config["run_name"] = run_name
-
-    # results/loss/0  and  checkpoints/loss/0
     config["result_dir"]     = os.path.join(config["result_dir"], os.path.basename(run_name))
     config["checkpoint_dir"] = os.path.join(config["checkpoint_dir"], run_name)
+
+    # attach CLI overrides
+    config["_cli"] = {
+        "ref_motion_id": args.ref_motion_id,
+        "caption": args.caption,
+    }
+
     return config
 
 def load_model(config, device):
@@ -139,7 +169,7 @@ if __name__ == "__main__":
     # 100STYLE dataset (eval mode so center-crop is used)
     ds_style = Dataset100Style(style_cfg, styles=all_styles, train=False)
 
-    B = 16
+    B = 8
 
     # --- Output dir --- #
     style_weight = config["model"].get("style_weight", None)
@@ -169,12 +199,10 @@ if __name__ == "__main__":
     if style_guidance is not None:
         tag_parts.append(fmt_tag("g", style_guidance))
 
-    REF_MOTION_ID = "031611"
+    REF_MOTION_ID = config["_cli"]["ref_motion_id"]
     style_name = REF_MOTION_ID
 
     style_tag = "_".join(tag_parts) if len(tag_parts) > 0 else "default"
-    output_dir = os.path.join(config["result_dir"], style_name, style_tag)
-    reset_dir(output_dir)
 
     # --- Mean & Std (tensors on device) --- #
     mean = torch.tensor(np.load(style_cfg["mean_path"]), dtype=torch.float32, device=device)
@@ -187,15 +215,31 @@ if __name__ == "__main__":
     win = win[:L]
     motions  = win.unsqueeze(0).to(device)          # (1, T, D) normalized
     len1     = torch.tensor([L], dtype=torch.long)  # (1,)
-    captions = ["a person walks in a circle"]        # or [cap]
+    cli_caption = config["_cli"]["caption"]
+
+    if cli_caption is not None:
+        captions = [cli_caption]
+    else:
+        captions = [cap]
+
+    output_dir_base = os.path.join(config["result_dir"], style_name, style_tag)
+
+    # Use the *single* caption that defines this run (before repeating to B)
+    caption_for_dir = captions[0] if isinstance(captions, list) and len(captions) > 0 else "unknown"
+    caption_dir = slug(caption_for_dir, maxlen=80)
+
+    output_dir = os.path.join(output_dir_base, caption_dir)
+    reset_dir(output_dir)
 
     # Repeat reference to B samples
     motions  = motions.repeat(B, 1, 1)              # (B, T, D)
     len1     = len1.repeat(B)                       # (B,)
     captions = captions * B                         # (B,)
 
+    len_out = torch.tensor(140, dtype=torch.long).repeat(B)
+
     # --- Generate stylized ---
-    stylized, captions_out = model.generate(motions, captions, len1, len1)
+    stylized, captions_out = model.generate(motions, captions, len_out, len1)
 
     # --- Denormalize stylized & reference ---
     stylized  = stylized * std + mean
@@ -211,7 +255,7 @@ if __name__ == "__main__":
                       [9, 13, 16, 18, 20]]
 
     # --- Render reference ONCE (since it's identical for all batch entries) ---
-    L_ref = int(len1[0].item())
+    L_ref = int(len_out[0].item())
     xyz_ref = joints_reference[0][:L_ref].astype(np.float32)  # (L_ref, 22, 3)
 
     ref_path = os.path.join(output_dir, "sample00_rep00.mp4")
@@ -225,7 +269,7 @@ if __name__ == "__main__":
     )
 
     # --- Prepare saving arrays ---
-    lengths = len1.cpu().numpy().astype(int)
+    lengths = len_out.cpu().numpy().astype(int)
 
     num_samples = B                  # total videos = B (sample00 is ref, sample01.. are generated)
     num_repetitions = 1

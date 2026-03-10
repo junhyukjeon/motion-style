@@ -1,0 +1,3 @@
+# python get_stickman.py --config ./configs/final_final/ours.yaml --ref_motion_id 030776 --caption "a person jogs forward, ducks, then punches"
+# python get_stickman.py --config ./configs/final_final/ours.yaml --ref_motion_id 030566 --caption "a person jogs slowly forward"
+python get_stickman_seokhyeon.py --config ./configs/final_final/ours.yaml --ref_motion_id 036870 --caption "a man is standing still"

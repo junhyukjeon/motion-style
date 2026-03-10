@@ -92,9 +92,27 @@ if __name__ == "__main__":
 
     # --- Dataset & Loader --- #
     train_styles, _ = train_test_split(all_styles, test_size=config['valid_size'], random_state=config["random_seed"])
+
     print(f"# Train styles: {len(train_styles)}")
 
     style_train = Dataset100Style(style_cfg, styles=train_styles, train=True,  use_ids=ids_train)
+
+    mapping = {}
+    with open("/source/junhyuk/motion-style/style-salad/dataset/100style/key_indices.txt") as f:
+        for line in f:
+            idx, name = line.strip().split(": ")
+            mapping[name] = int(idx)
+
+    # get indices of your train styles
+    train_indices = [mapping[s] for s in train_styles if s in mapping]
+
+    # count overlap with 0–46
+    overlap = sum(i <= 46 for i in train_indices)
+
+    print("train indices:", train_indices)
+    print("num overlapping with 0–46:", overlap)
+
+    import pdb; pdb.set_trace()
 
     sampler_cfg = config['sampler']
     train_sampler = SAMPLER_REGISTRY[sampler_cfg['type']](sampler_cfg, style_train)

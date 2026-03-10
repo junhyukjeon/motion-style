@@ -180,7 +180,7 @@ class Text2StylizedMotion(nn.Module):
 
         pred_style, pred_hml = torch.split(pred, latent1.shape[0], dim=0)
         pred_style = pred_style * len_mask1[..., None, None].float()
-        pred_hml  = pred_hml  * len_mask2[..., None, None].float()
+        pred_hml   = pred_hml  * len_mask2[..., None, None].float()
 
         x0_style = self._recover_x0_from_v(
             noisy_latent1,   # x_t from HumanML3D

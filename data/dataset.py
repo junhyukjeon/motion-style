@@ -26,7 +26,7 @@ class Dataset100Style(Dataset):
 
         # style map (stable indices by sorted style name)
         with open(config["style_json"], "r") as f:
-            style_map_all = json.load(f)  # {style_name: [motion_ids]}
+            style_map_all = json.load(f)
         styles_sorted = sorted(style_map_all.keys())
         self.style_to_style_idx = {s: i for i, s in enumerate(styles_sorted)}
         self.style_idx_to_style = {i: s for s, i in self.style_to_style_idx.items()}

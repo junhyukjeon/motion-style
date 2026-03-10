@@ -1,6 +1,16 @@
 export PYTHONPATH="$PYTHONPATH:$(pwd)/eval2:$(pwd)/salad"
 
-python eval2/evaluate.py --config configs/final/ours.yaml  --style_weight 1.5 --style_guidance 1.0 --csv_name ours.csv
+python eval2/evaluate.py --config configs/final_final/ours.yaml  --style_weight 1.0 --style_guidance 1.0 --csv_name ours.csv
+python eval2/evaluate.py --config configs/final_final/75.yaml  --style_weight 1.0 --style_guidance 1.0 --csv_name ours.csv
+python eval2/evaluate.py --config configs/final_final/50.yaml  --style_weight 1.0 --style_guidance 1.0 --csv_name ours.csv
+python eval2/evaluate.py --config configs/final_final/25.yaml  --style_weight 1.0 --style_guidance 1.0 --csv_name ours.csv
+
+python eval2/evaluate.py --config configs/final_final/ours.yaml  --style_weight 1.0 --style_guidance 0.0 --csv_name ours.csv
+python eval2/evaluate.py --config configs/final_final/75.yaml  --style_weight 1.0 --style_guidance 0.0 --csv_name ours.csv
+python eval2/evaluate.py --config configs/final_final/50.yaml  --style_weight 1.0 --style_guidance 0.0 --csv_name ours.csv
+python eval2/evaluate.py --config configs/final_final/25.yaml  --style_weight 1.0 --style_guidance 0.0 --csv_name ours.csv
+
+
 # python eval2/evaluate.py --config configs/final/rank2.yaml  --style_weight 1.5 --style_guidance 1.0 --csv_name rank.csv
 # python eval2/evaluate.py --config configs/final/rank4.yaml  --style_weight 1.5 --style_guidance 1.0 --csv_name rank.csv
 # python eval2/evaluate.py --config configs/final/75.yaml  --style_weight 1.5 --style_guidance 1.0 --csv_name please.csv

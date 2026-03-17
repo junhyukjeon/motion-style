@@ -1,4 +1,3 @@
-# cp -r ./salad/salad /opt/conda/envs/salad
 cp -r ./style /opt/conda/envs/style
 
 apt-get update
@@ -7,3 +6,4 @@ rm /opt/conda/bin/ffmpeg
 ln -s /usr/bin/ffmpeg /opt/conda/bin/ffmpeg
 
 echo 'export PATH=/source/junhyuk/blender:$PATH' >> ~/.bashrc
+export PYTHONPATH=/source/junhyuk/motion-style/style-salad

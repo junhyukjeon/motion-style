@@ -65,8 +65,6 @@ def load_denoiser(config, opt, vae_dim):
         if not is_clip(n)
     )
 
-    # n_train = sum(p.numel() for p in denoiser.parameters() if p.requires_grad)
-    # n_total = sum(p.numel() for p in denoiser.parameters())
     print(f"Trainable params in denoiser: {n_train}/{n_total}")
     return denoiser
 

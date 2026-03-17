@@ -29,6 +29,8 @@ from model.t2sm import Text2StylizedMotion
 from utils.motion import recover_from_ric
 
 from mld.data.humanml.utils.plot_script import plot_3d_motion
+
+import pdb; pdb.set_trace()
 # from salad.utils.plot_script import plot_3d_motion
 
 def set_seed(seed=42):

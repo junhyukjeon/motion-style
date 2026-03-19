@@ -41,7 +41,6 @@ class Text2StylizedMotion(nn.Module):
         self.vae           = load_vae(self.vae_opt).to(self.device)
         self.style_encoder = STYLE_REGISTRY[config['style_encoder']['class']](config['style_encoder']).to(self.device)
         self.denoiser      = load_denoiser(config['denoiser'], self.opt, self.vae_opt.latent_dim).to(self.device)
-        self.tokenizer     = self.denoiser.clip_model.tokenizer
 
         # Scheduler
         self.scheduler     = DDIMScheduler(
@@ -52,6 +51,21 @@ class Text2StylizedMotion(nn.Module):
             prediction_type=self.opt.prediction_type,
             clip_sample=False,
         )
+
+        self.register_buffer("style_text_features", torch.empty(0), persistent=False)
+        self.register_buffer("style_affinity", torch.empty(0), persistent=False)
+
+    @torch.no_grad()
+    def set_style_text_prior(self, style_names):
+        """
+        style_names[i] must correspond to style_idx == i
+        """
+        if len(style_names) == 0:
+            raise ValueError("style_names must not be empty.")
+
+        text_features = self.denoiser.clip_model.encode_text_pooled(style_names)
+        self.style_text_features = text_features
+        self.style_affinity = text_features @ text_features.T
 
     def _recover_x0_from_v(self, x_t, v_pred, timesteps):
         """
@@ -234,9 +248,6 @@ class Text2StylizedMotion(nn.Module):
 
         # L2:
         loss = F.mse_loss(style, style_target, reduction="mean")
-        # or cosine:
-        # loss = (1.0 - F.cosine_similarity(style, style_target, dim=-1)).mean()
-        # print(loss)
 
         # gradient wrt z
         grad_raw = torch.autograd.grad(loss, z, retain_graph=False, create_graph=False)[0]

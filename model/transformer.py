@@ -2,12 +2,20 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from salad.models.denoiser.transformer import MultiheadAttention
+# from salad.models.denoiser.transformer import MultiheadAttention
 from model.lora import LORA_REGISTRY
-from model.gate import JointGate
-
 
 # --- Skip Transformer --- #
+def parse_attn_lora_config(config):
+    lora_cfg = config.get("lora", None)
+    
+    if lora_cfg is None:
+        return None, set()
+
+    targets = {t.lower() for t in lora_cfg.get("targets", [])}
+    return lora_cfg, targets
+
+
 def featurewise_affine(x, scale_shift):
     scale, shift = scale_shift
     return x * (scale + 1) + shift
@@ -22,9 +30,9 @@ class DenseFiLM(nn.Module):
         )
 
         self.use_lora = False
-        if "lora" in config:
-            lora_cfg = config["lora"]
-            self.lora = LORA_REGISTRY[lora_cfg['type']](lora_cfg)
+        lora_cfg = config.get("lora", None)
+        if lora_cfg is not None:
+            self.lora = LORA_REGISTRY[lora_cfg['class']](lora_cfg)
             self.use_lora = True
 
     def forward(self, cond, style=None):
@@ -51,11 +59,6 @@ class MultiheadAttention(nn.Module):
         d_model,
         n_heads,
         dropout,
-        batch_first=True,
-        use_lora=False,
-        lora_q=False,
-        lora_v=False,
-        lora_o=False,
     ):
         super(MultiheadAttention, self).__init__()
         self.Wq = nn.Linear(d_model, d_model)
@@ -65,22 +68,25 @@ class MultiheadAttention(nn.Module):
 
         self.n_heads = n_heads
         self.head_dim = d_model // n_heads
-        self.batch_first = batch_first
         self.dropout = nn.Dropout(dropout)
 
-        self.use_lora = use_lora and ("lora" in config)
-        self.lora_q_on = self.use_lora and lora_q
-        self.lora_v_on = self.use_lora and lora_v
-        self.lora_o_on = self.use_lora and lora_o
+        lora_cfg, targets = parse_attn_lora_config(config)
+
+        self.use_lora = lora_cfg is not None
+        self.lora_q_on = "q" in targets
+        self.lora_v_on = "v" in targets
+        self.lora_k_on = "k" in targets
+        self.lora_o_on = ("o" in targets) or ("out" in targets)
 
         if self.use_lora:
-            lora_cfg = config["lora"]
             if self.lora_q_on:
-                self.q_lora = LORA_REGISTRY[lora_cfg["type"]](lora_cfg)
+                self.q_lora = LORA_REGISTRY[lora_cfg["class"]](lora_cfg)
             if self.lora_v_on:
-                self.v_lora = LORA_REGISTRY[lora_cfg["type"]](lora_cfg)
+                self.v_lora = LORA_REGISTRY[lora_cfg["class"]](lora_cfg)
             if self.lora_o_on:
-                self.o_lora = LORA_REGISTRY[lora_cfg["type"]](lora_cfg)
+                self.o_lora = LORA_REGISTRY[lora_cfg["class"]](lora_cfg)
+            if self.lora_k_on:
+                self.k_lora = LORA_REGISTRY[lora_cfg["class"]](lora_cfg)
 
     def forward(
         self,
@@ -91,7 +97,6 @@ class MultiheadAttention(nn.Module):
         need_weights=True,
         average_attn_weights=False,
         style=None,
-        gate=None,
     ):
         """
         query: [B, T1, D]
@@ -115,16 +120,18 @@ class MultiheadAttention(nn.Module):
                 Aq, Bq = self.q_lora(style)               # Aq: [B,r,D], Bq: [B,D,r]
                 tmp = torch.einsum("btd,brd->btr", q_in, Aq)
                 dq  = self.q_lora.scale * torch.einsum("bdr,btr->btd", Bq, tmp)
-                if gate is not None:
-                    dq = gate * dq
                 q = q + dq
+
+            if self.lora_k_on:
+                Ak, Bk = self.k_lora(style)
+                tmp = torch.einsum("btd,brd->btr", k_in, Ak)
+                dk = self.k_lora.scale * torch.einsum("bdr,btr->btd", Bk, tmp)
+                k = k + dk
 
             if self.lora_v_on:
                 Av, Bv = self.v_lora(style)
                 tmp = torch.einsum("btd,brd->btr", v_in, Av)
                 dv  = self.v_lora.scale * torch.einsum("bdr,btr->btd", Bv, tmp)
-                if gate is not None:
-                    dv = gate * dv
                 v = v + dv
 
         # Heads
@@ -149,8 +156,6 @@ class MultiheadAttention(nn.Module):
             Ao, Bo = self.o_lora(style)
             tmp = torch.einsum("btd,brd->btr", attn_output, Ao)
             do  = self.o_lora.scale * torch.einsum("bdr,btr->btd", Bo, tmp)
-            if gate is not None:
-                do = gate * do
             out = out + do
 
         if need_weights:
@@ -159,7 +164,7 @@ class MultiheadAttention(nn.Module):
             return out, attn_weights
         return out, None
 
-    def forward_with_fixed_attn_weights(self, attn_weights, value, style=None, gate=None):
+    def forward_with_fixed_attn_weights(self, attn_weights, value, style=None):
         """
         attn_weights: [B,H,T1,T2]
         value:        [B,T2,D]
@@ -175,8 +180,6 @@ class MultiheadAttention(nn.Module):
             Av, Bv = self.v_lora(style)
             tmp = torch.einsum("btd,brd->btr", v_in, Av)
             dv  = self.v_lora.scale * torch.einsum("bdr,btr->btd", Bv, tmp)
-            if gate is not None:
-                dv = gate * dv
             v = v + dv
 
         v = v.view(B, T2, self.n_heads, self.head_dim).transpose(1, 2)  # [B,H,T2,dh]
@@ -191,8 +194,6 @@ class MultiheadAttention(nn.Module):
             Ao, Bo = self.o_lora(style)
             tmp = torch.einsum("btd,brd->btr", attn_output, Ao)
             do  = self.o_lora.scale * torch.einsum("bdr,btr->btd", Bo, tmp)
-            if gate is not None:
-                do = gate * do
             out = out + do
 
         return out, attn_weights
@@ -207,26 +208,34 @@ class STTransformerLayer(nn.Module):
         super(STTransformerLayer, self).__init__()
         self.opt = opt
         
+        attn_cfg = config["attention"]
+
         # skeletal attention
         self.skel_attn = MultiheadAttention(
-            config["attention"], opt.latent_dim, opt.n_heads, opt.dropout,
-            batch_first=True, use_lora=False, lora_q=False, lora_v=False, lora_o=False
+            attn_cfg["skeletal"],
+            opt.latent_dim,
+            opt.n_heads,
+            opt.dropout,
         )
         self.skel_norm = nn.LayerNorm(opt.latent_dim)
         self.skel_dropout = nn.Dropout(opt.dropout)
 
         # temporal attention
         self.temp_attn = MultiheadAttention(
-            config["attention"], opt.latent_dim, opt.n_heads, opt.dropout,
-            batch_first=True, use_lora=False, lora_q=False, lora_v=False, lora_o=False
+            attn_cfg["temporal"],
+            opt.latent_dim,
+            opt.n_heads,
+            opt.dropout,
         )
         self.temp_norm = nn.LayerNorm(opt.latent_dim)
         self.temp_dropout = nn.Dropout(opt.dropout)
 
         # cross attention
         self.cross_attn = MultiheadAttention(
-            config["attention"], opt.latent_dim, opt.n_heads, opt.dropout,
-            batch_first=True, use_lora=False, lora_q=False, lora_v=False, lora_o=False
+            attn_cfg["cross"],
+            opt.latent_dim,
+            opt.n_heads,
+            opt.dropout,
         )
         self.cross_src_norm = nn.LayerNorm(opt.latent_dim)
         self.cross_tgt_norm = nn.LayerNorm(opt.latent_dim)
@@ -247,13 +256,6 @@ class STTransformerLayer(nn.Module):
         self.cross_film = DenseFiLM(config['film'], opt)
         self.ffn_film = DenseFiLM(config['film'], opt)
 
-        # Gate (optional)
-        gate_cfg = config.get("gate", None)
-        if gate_cfg is not None:
-            self.joint_gate = JointGate(gate_cfg)
-        else:
-            self.joint_gate = None
-
     def _sa_block(self, x, style=None, fixed_attn=None):
         x = self.skel_norm(x)
         if fixed_attn is None:
@@ -272,13 +274,13 @@ class STTransformerLayer(nn.Module):
         x = self.temp_dropout(x)
         return x, attn
 
-    def _ca_block(self, x, mem, style=None, mask=None, fixed_attn=None, gate=None):
+    def _ca_block(self, x, mem, style=None, mask=None, fixed_attn=None):
         x = self.cross_src_norm(x)
         mem = self.cross_tgt_norm(mem)
         if fixed_attn is None:
-            x, attn = self.cross_attn.forward(x, mem, mem, key_padding_mask=mask, need_weights=True, average_attn_weights=False, style=style, gate=gate)
+            x, attn = self.cross_attn.forward(x, mem, mem, key_padding_mask=mask, need_weights=True, average_attn_weights=False, style=style)
         else:
-            x, attn = self.cross_attn.forward_with_fixed_attn_weights(fixed_attn, mem, style=style, gate=gate)
+            x, attn = self.cross_attn.forward_with_fixed_attn_weights(fixed_attn, mem, style=style)
         x = self.cross_dropout(x)
         return x, attn
     
@@ -294,7 +296,6 @@ class STTransformerLayer(nn.Module):
                 skel_attn=None, temp_attn=None, cross_attn=None, style=None):
 
         B, T, J, D = x.size()
-        S = style.size(-1) if style is not None else None
 
         # Diffusion timestep embedding
         skel_cond = self.skel_film(cond, style=style)
@@ -329,18 +330,7 @@ class STTransformerLayer(nn.Module):
     
         # Cross attention
         x_c = x.reshape(B, T * J, D)
-        gate = None
-        if self.joint_gate is not None:
-            if memory_mask is not None:
-                valid = ~memory_mask # Um idk about this...
-                w = valid.float()
-                pooled = (memory * w.unsqueeze(-1)).sum(dim=1)
-                denom = w.sum(dim=1, keepdim=True).clamp(min=1e-6)
-                text_pool = pooled / denom
-            else:
-                text_pool = memory.mean(dim=1)
-            gate = self.joint_gate(text_pool, T)
-        ca_out, ca_weight = self._ca_block(x_c, memory, style=style, mask=memory_mask, fixed_attn=cross_attn, gate=gate)
+        ca_out, ca_weight = self._ca_block(x_c, memory, style=style, mask=memory_mask, fixed_attn=cross_attn)
         ca_out = ca_out.reshape(B, T, J, D)
         ca_out = featurewise_affine(ca_out, cross_cond)
         x = x + ca_out
@@ -385,8 +375,7 @@ class SkipTransformer(nn.Module):
         fixed_ta: [bsz*njoints, nlayers, nheads, nframes, nframes]
         fixed_ca: [bsz, nlayers, nheads, nframes*njoints, dclip]
         """
-        # B, T, J, D = x.size()
-        
+                
         xs = []
         attn_weights = [[], [], []]
         layer_idx = 0

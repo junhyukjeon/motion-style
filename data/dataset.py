@@ -7,46 +7,42 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 
 
-class Dataset100Style(Dataset):
-    def __init__(self, config, styles, train=True, use_ids=None):
+class Dataset100STYLE(Dataset):
+    def __init__(self, config):
         self.motion_dir  = config["motion_dir"]
         self.mean        = np.load(config["mean_path"])
         self.std         = np.load(config["std_path"])
         self.unit_length = int(config["unit_length"])
         self.min_frames  = int(config["min_frames"])
-        self.max_frames  = int(config["max_frames"]) if config["max_frames"] is not None else None
-        self.train       = bool(train)
-        self.use_ids     = set(use_ids) if use_ids is not None else None
+        self.max_frames  = int(config["max_frames"])
 
-        # Mixed-like toggles
         self.drop_first_frame = bool(config.get("drop_first_frame", False))
-
-        # single/double rounding probability (Mixed used 2x "single", 1x "double")
         self.unit_double_prob = float(config.get("unit_double_prob", 0.0))
 
-        # style map (stable indices by sorted style name)
+        # Style mapping (stable indices by sorted style name)
         with open(config["style_json"], "r") as f:
             style_map_all = json.load(f)
-        styles_sorted = sorted(style_map_all.keys())
-        self.style_to_style_idx = {s: i for i, s in enumerate(styles_sorted)}
-        self.style_idx_to_style = {i: s for s, i in self.style_to_style_idx.items()}
-        self.style_map = {self.style_to_style_idx[s]: style_map_all[s] for s in styles}
+        all_styles = sorted(style_map_all.keys())
+        excluded_styles = config["excluded_styles"]
+        selected_styles = [s for s in all_styles if s not in excluded_styles]
+        self.style_to_idx = {s: i for i, s in enumerate(selected_styles)}
+        self.idx_to_style = {i: s for s, i in self.style_to_idx.items()}
+        self.style_map = {self.style_to_idx[s]: style_map_all[s] for s in selected_styles}
 
-        # content map (used for filtering + default caption)
+        # Content mapping (for filtering and captions)
         with open(config["content_json"], "r") as f:
             content_map = json.load(f)  # {content_key: [motion_ids]}
         contents_sorted = sorted(content_map.keys())
-        self.content_to_content_idx = {c: i for i, c in enumerate(contents_sorted)}
-        self.content_idx_to_content = {i: c for c, i in self.content_to_content_idx.items()}
+        self.content_to_idx = {c: i for i, c in enumerate(contents_sorted)}
+        self.idx_to_content = {i: c for c, i in self.content_to_idx.items()}
 
-        # motion_id -> content_idx
         self.motion_to_content_idx = {}
         for content_key, mids in content_map.items():
-            cidx = self.content_to_content_idx[content_key]
+            cidx = self.content_to_idx[content_key]
             for mid in mids:
                 self.motion_to_content_idx[mid] = cidx
 
-        # fixed captions by content code
+        # Content captions
         self.content_prompts = {
             "BR": "a person is running backward",
             "BW": "a person is walking backward",
@@ -57,27 +53,23 @@ class Dataset100Style(Dataset):
             "SW": "a person is walking sideways",
         }
 
-        # exclude TR1/2/3 contents
+        # Content filtering
         exclude_keys = {"TR1", "TR2", "TR3"}
-        self.exclude_content_idcs = {
-            self.content_to_content_idx[k]
-            for k in exclude_keys if k in self.content_to_content_idx
+        self.exclude_content_idxs = {
+            self.content_to_idx[k]
+            for k in exclude_keys if k in self.content_to_idx
         }
 
-        # index once (apply Mixed-like filters)
-        kept = miss = short = outlier = filtered = 0
+        # Index valid samples
         self.items = []
         self.nfeats = None
+        kept = miss = short = outlier = filtered = 0
 
         for style_idx, motion_ids in self.style_map.items():
-            style_name = self.style_idx_to_style[style_idx]
+            style_name = self.idx_to_style[style_idx]
             iterable = tqdm(motion_ids, desc=f"Index 100STYLE style={style_name}", leave=False)
 
             for motion_id in iterable:
-                if self.use_ids is not None and motion_id not in self.use_ids:
-                    filtered += 1
-                    continue
-
                 path = os.path.join(self.motion_dir, f"{motion_id}.npy")
                 if not os.path.exists(path):
                     miss += 1
@@ -87,7 +79,8 @@ class Dataset100Style(Dataset):
                 T = int(arr.shape[0])
 
                 if self.drop_first_frame and T > 1:
-                    arr = arr[1:]; T -= 1
+                    arr = arr[1:]
+                    T -= 1
 
                 if T < self.min_frames:
                     short += 1
@@ -98,7 +91,7 @@ class Dataset100Style(Dataset):
                     continue
 
                 cidx = self.motion_to_content_idx.get(motion_id, None)
-                if cidx is None or cidx in self.exclude_content_idcs:
+                if cidx is None or cidx in self.exclude_content_idxs:
                     filtered += 1
                     continue
 
@@ -109,12 +102,14 @@ class Dataset100Style(Dataset):
                     "motion_id": motion_id,
                     "style_idx": style_idx,
                     "content_idx": cidx,
-                    "length": T
+                    "length": T,
                 })
                 kept += 1
 
                 if kept % 200 == 0:
-                    iterable.set_postfix(kept=kept, miss=miss, short=short, outlier=outlier, filt=filtered)
+                    iterable.set_postfix(
+                        kept=kept, miss=miss, short=short, outlier=outlier, filt=filtered
+                    )
 
         self.items.sort(key=lambda x: x["length"])
         print(f"[100STYLE] kept={kept} miss={miss} short={short} outlier={outlier} filtered={filtered}")
@@ -123,50 +118,43 @@ class Dataset100Style(Dataset):
         return len(self.items)
 
     def __getitem__(self, idx: int):
-        meta   = self.items[idx]
+        meta = self.items[idx]
         motion = np.load(os.path.join(self.motion_dir, f"{meta['motion_id']}.npy"), mmap_mode="r")
-        T, D   = int(motion.shape[0]), int(motion.shape[1])
+        T, D = int(motion.shape[0]), int(motion.shape[1])
 
         if self.drop_first_frame and T > 1:
             motion = motion[1:]
             T -= 1
 
-        # unit rounding with optional "double"
         U = self.unit_length
         if U <= 0:
             m_length = T
         else:
             k = max(1, T // U)
             m_length = k * U
-            if self.train and U < 10 and self.unit_double_prob > 0.0 and k > 1:
+            if U < 10 and self.unit_double_prob > 0.0 and k > 1:
                 if random.random() < self.unit_double_prob:
                     m_length = (k - 1) * U
+
         if self.max_frames is not None:
             m_length = min(m_length, self.max_frames)
         m_length = max(1, min(m_length, T))
 
-        # crop start
-        if self.train:
-            start_max = max(0, T - m_length)
-            s = 0 if start_max == 0 else random.randint(0, start_max)
-        else:
-            s = max(0, (T - m_length) // 2)
-        clip = motion[s:s + m_length]  # (m_length, D)
+        # Random crop
+        start_max = max(0, T - m_length)
+        s = 0 if start_max == 0 else random.randint(0, start_max)
+        clip = motion[s:s + m_length]
 
-        # z-norm
         window = (clip - self.mean) / self.std
         window = torch.tensor(window, dtype=torch.float32)
 
-        # right-pad
+        # Right padding
         if self.max_frames is not None and m_length < self.max_frames:
             pad = torch.zeros(self.max_frames - m_length, D, dtype=window.dtype)
             window = torch.cat([window, pad], dim=0)
 
-        # caption from content code
-        content_key = self.content_idx_to_content[meta["content_idx"]]
-        caption = self.content_prompts.get(content_key, "a person is moving")
-
-        # match Mixed ordering for 100STYLE side
+        content_key = self.idx_to_content[meta["content_idx"]]
+        caption = self.content_prompts[content_key]
         return caption, window, int(m_length), int(meta["style_idx"])
 
 
@@ -279,3 +267,10 @@ class DatasetHumanML3D(Dataset):
 
         # style_idx = -1 for HumanML3D
         return caption, window, int(m_length), -1
+    
+
+DATASET_REGISTRY = {
+    "Dataset100STYLE"  : Dataset100STYLE,
+    "DatasetHumanML3D" : DatasetHumanML3D
+}
+    

@@ -74,7 +74,7 @@ model:
 loss:
   style: 
     weight: 1.0
-  supcon:
+  soft_supcon:
     weight: 1.0
     temperature: 0.07
 

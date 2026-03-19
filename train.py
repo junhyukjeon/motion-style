@@ -82,6 +82,9 @@ if __name__ == "__main__":
     # Model
     model_cfg = config['model']
     model = Text2StylizedMotion(model_cfg).to(device)
+    style_names = [dataset.idx_to_style[i] for i in range(len(dataset.idx_to_style))]
+    model.set_style_text_prior(style_names)
+
     optimizer = torch.optim.Adam(
         (p for p in model.parameters() if p.requires_grad),
         lr=config['lr']

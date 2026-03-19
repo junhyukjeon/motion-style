@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 
+
 def loss_style(config, model, out):
     pred       = out["pred"]
     latent     = out["latent"]
@@ -8,6 +9,7 @@ def loss_style(config, model, out):
     timesteps  = out["timesteps"]
     velocity   = model.scheduler.get_velocity(latent, noise, timesteps).detach()
     return F.mse_loss(pred, velocity)
+
 
 def loss_supcon(config, model, out):
     temperature = config['temperature']
@@ -41,6 +43,7 @@ def loss_supcon(config, model, out):
     mean_log_prob_pos = (pos_mask.float() * log_prob).sum(dim=1) / (pos_mask.sum(dim=1) + 1e-8)
     return -mean_log_prob_pos.mean()
 
+
 def loss_soft_supcon(config, model, out):
     temperature = config["temperature"]
     style = out["style"]
@@ -55,7 +58,6 @@ def loss_soft_supcon(config, model, out):
     sim_stable = sim - sim.max(dim=1, keepdim=True).values
 
     weight = model.style_affinity[style_idx][:, style_idx]
-    weight = 0.5 * (weight + 1.0)
     weight = weight * logits_mask
 
     same = (style_idx.view(1, -1) == style_idx.view(-1, 1)) & logits_mask
@@ -70,6 +72,7 @@ def loss_soft_supcon(config, model, out):
     mean_log_prob = (weight * log_prob).sum(dim=1)
 
     return -mean_log_prob.mean()
+
 
 LOSS_REGISTRY = {
     "style"   : loss_style,

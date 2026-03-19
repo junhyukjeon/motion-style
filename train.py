@@ -12,6 +12,7 @@ from torch.cuda.amp import autocast
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+from utils.plot import plot_tsne
 
 from data.dataset import DATASET_REGISTRY
 from data.sampler import SAMPLER_REGISTRY
@@ -78,6 +79,11 @@ if __name__ == "__main__":
     sampler_cfg = config['sampler']
     sampler = SAMPLER_REGISTRY[sampler_cfg['class']](sampler_cfg, dataset)
     dataloader = DataLoader(dataset, batch_sampler=sampler)
+
+    # t-SNE
+    label_to_name_dict = dict(dataset.idx_to_style)
+    tsne_every = int(config.get("tsne_every", 1))
+    tsne_max_samples = int(config.get("tsne_max_samples", 1000))
 
     # Model
     model_cfg = config['model']
@@ -188,7 +194,7 @@ if __name__ == "__main__":
                 for _, (scaled, _, _) in losses.items():
                     total_loss += scaled
 
-            total_loss.backward(retain_graph=True)
+            total_loss.backward()
             optimizer.step()
 
             pbar.set_postfix(loss=float((total_loss).item()))
@@ -236,4 +242,17 @@ if __name__ == "__main__":
             torch.save(
                 sd_trainable,
                 os.path.join(config["checkpoint_dir"], f"epoch_{epoch:04d}.ckpt")
+            )
+
+        if tsne_every > 0 and epoch % tsne_every == 0:
+            plot_tsne(
+                model=model,
+                loader=dataloader,
+                device=device,
+                epoch=epoch,
+                title="train",
+                result_dir=config["result_dir"],
+                label_to_name_dict=label_to_name_dict,
+                max_samples=tsne_max_samples,
+                writer=writer,
             )

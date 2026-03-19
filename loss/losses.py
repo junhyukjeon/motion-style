@@ -46,32 +46,27 @@ def loss_supcon(config, model, out):
 
 def loss_soft_supcon(config, model, out):
     temperature = config["temperature"]
-    style = out["style"]
-    style_idx = out["style_idx"]
 
-    style = F.normalize(style, dim=1)
+    style = F.normalize(out["style"], dim=1)
+    style_idx = out["style_idx"]
 
     sim = torch.matmul(style, style.T) / temperature
     N = sim.size(0)
 
     logits_mask = ~torch.eye(N, dtype=torch.bool, device=style.device)
-    sim_stable = sim - sim.max(dim=1, keepdim=True).values
 
-    weight = model.style_affinity[style_idx][:, style_idx]
-    weight = weight * logits_mask
+    pred_logits = sim.masked_fill(~logits_mask, float("-inf"))
+    log_p = F.log_softmax(pred_logits, dim=1)
 
-    same = (style_idx.view(1, -1) == style_idx.view(-1, 1)) & logits_mask
-    weight = torch.where(same, torch.ones_like(weight), weight)
+    target_logits = model.style_affinity[style_idx][:, style_idx] / temperature
+    target_logits = target_logits.masked_fill(~logits_mask, float("-inf"))
+    target = F.softmax(target_logits, dim=1)
 
-    weight = weight / (weight.sum(dim=1, keepdim=True) + 1e-8)
+    # zero out invalid entries after softmax/log_softmax to avoid 0 * -inf
+    log_p = torch.where(logits_mask, log_p, torch.zeros_like(log_p))
+    target = torch.where(logits_mask, target, torch.zeros_like(target))
 
-    exp_sim = torch.exp(sim_stable) * logits_mask
-    denom = exp_sim.sum(dim=1, keepdim=True) + 1e-8
-
-    log_prob = sim_stable - torch.log(denom)
-    mean_log_prob = (weight * log_prob).sum(dim=1)
-
-    return -mean_log_prob.mean()
+    return -(target * log_p).sum(dim=1).mean()
 
 
 LOSS_REGISTRY = {

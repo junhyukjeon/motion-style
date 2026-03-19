@@ -24,7 +24,7 @@ dataset:
 sampler:
   class: TrainSampler
   batch_size: 64
-  samples_per_style: 2
+  samples_per_style: 4
 
 # --- Model --- #
 model:

@@ -63,9 +63,11 @@ class Text2StylizedMotion(nn.Module):
         if len(style_names) == 0:
             raise ValueError("style_names must not be empty.")
 
-        text_features = self.denoiser.clip_model.encode_text_pooled(style_names)
+        prompts = [f"a human motion in a {style} style" for style in style_names]
+        text_features = self.denoiser.clip_model.encode_text_pooled(prompts)
         self.style_text_features = text_features
         self.style_affinity = text_features @ text_features.T
+        
 
     def _recover_x0_from_v(self, x_t, v_pred, timesteps):
         """
@@ -112,7 +114,8 @@ class Text2StylizedMotion(nn.Module):
             latent = latent * len_mask[..., None, None].float()
 
         style = self.style_encoder(latent, len_mask)
-        style = self.pool_style(style, len_mask)
+        # style = self.pool_style(style, len_mask)
+        style = F.normalize(style, dim=1)
 
         swap_idx = torch.arange(style.size(0), device=style.device) ^ 1
         style_swapped = style[swap_idx]

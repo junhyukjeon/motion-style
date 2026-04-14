@@ -29,6 +29,7 @@ sampler:
 # --- Model --- #
 model:
   denoiser:
+    class: HyperLoRADenoiser
     transformer:
       layer:
         attention:
@@ -80,39 +81,23 @@ model:
                 style_dim: 256
                 hidden_dim: 512
                 num_heads: 8
-        film:
-          lora: null
-              
+        film: {}
+
   style_encoder:
     class: StyleMLP
-    dropout: 0.1
     style_dim: 256
-    num_layers: 4
-    block:
-      dropout: 0.1
-      style_dim: 256
-      hidden_dim: 512
-      num_heads: 8
-      repeats: 2
   text_drop: 0.1
-  style_drop: 0.1
   text_weight: 7.5
   style_weight: 1.5
   style_guidance: 0.75
 
 # --- Losses --- #
 loss:
-  style: 
+  style:
     weight: 1.0
   supcon:
     weight: 1.0
     temperature: 0.07
-
-# --- Early Stopper --- #
-early:
-  patience: 10
-  min_delta: 0.0
-  mode: min
 
 # --- Calibration --- #
 steps: 100
@@ -121,4 +106,6 @@ tau: 0.001
 # --- Training --- #
 epochs: 100
 lr: 0.0001
-valid_size: 0.0
+save_every: 10
+tsne_every: 10
+tsne_max_samples: 1000

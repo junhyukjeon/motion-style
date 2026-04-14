@@ -18,6 +18,7 @@ class Dataset100STYLE(Dataset):
 
         self.drop_first_frame = bool(config.get("drop_first_frame", False))
         self.unit_double_prob = float(config.get("unit_double_prob", 0.0))
+        self.motion_cache = {}
 
         # Style mapping (stable indices by sorted style name)
         with open(config["style_json"], "r") as f:
@@ -98,6 +99,11 @@ class Dataset100STYLE(Dataset):
                 if self.nfeats is None:
                     self.nfeats = int(arr.shape[1])
 
+                # Cache a normalized float32 tensor once during indexing so
+                # __getitem__ only needs to slice and pad random windows.
+                motion = np.asarray((arr - self.mean) / self.std, dtype=np.float32)
+                self.motion_cache[motion_id] = torch.from_numpy(motion.copy())
+
                 self.items.append({
                     "motion_id": motion_id,
                     "style_idx": style_idx,
@@ -113,18 +119,15 @@ class Dataset100STYLE(Dataset):
 
         self.items.sort(key=lambda x: x["length"])
         print(f"[100STYLE] kept={kept} miss={miss} short={short} outlier={outlier} filtered={filtered}")
+        print(f"[100STYLE] cached {len(self.motion_cache)} motions in RAM")
 
     def __len__(self):
         return len(self.items)
 
     def __getitem__(self, idx: int):
         meta = self.items[idx]
-        motion = np.load(os.path.join(self.motion_dir, f"{meta['motion_id']}.npy"), mmap_mode="r")
+        motion = self.motion_cache[meta["motion_id"]]
         T, D = int(motion.shape[0]), int(motion.shape[1])
-
-        if self.drop_first_frame and T > 1:
-            motion = motion[1:]
-            T -= 1
 
         U = self.unit_length
         if U <= 0:
@@ -145,8 +148,7 @@ class Dataset100STYLE(Dataset):
         s = 0 if start_max == 0 else random.randint(0, start_max)
         clip = motion[s:s + m_length]
 
-        window = (clip - self.mean) / self.std
-        window = torch.tensor(window, dtype=torch.float32)
+        window = clip
 
         # Right padding
         if self.max_frames is not None and m_length < self.max_frames:

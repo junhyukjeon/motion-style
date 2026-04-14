@@ -122,8 +122,7 @@ def load_config():
     return config
 
 def load_model(config, device):
-    model_cfg = config['model']
-    model = Text2StylizedMotion(model_cfg).to(device)
+    model = Text2StylizedMotion(config["model"]).to(device)
     model.load_state_dict(torch.load(os.path.join(config["checkpoint_dir"], "latest.ckpt"), map_location=device), strict=False)
     model.eval()
     return model

@@ -66,7 +66,6 @@ model:
       num_heads: 8
       repeats: 2
   text_drop: 0.1
-  style_drop: 0.1
   text_weight: 7.5
   style_weight: 1.5
   style_guidance: 1.0

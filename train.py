@@ -1,9 +1,18 @@
 # --- Imports ---
 import argparse
 import json
-import numpy as np
 import os
 import random
+
+# Cap host-side threading by default so concurrent training jobs do not
+# oversubscribe the same CPU. These can still be overridden from the shell.
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+os.environ.setdefault("MKL_NUM_THREADS", "4")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "4")
+os.environ.setdefault("TORCH_NUM_INTEROP_THREADS", "1")
+
+import numpy as np
 import torch
 import torch.nn.functional as F
 import yaml
@@ -66,6 +75,11 @@ if __name__ == "__main__":
     config = load_config()
     set_seed(config["random_seed"])
 
+    # Match Torch's thread pools to the default caps above unless the user
+    # overrides them via environment variables at launch time.
+    torch.set_num_threads(int(os.environ["OMP_NUM_THREADS"]))
+    torch.set_num_interop_threads(int(os.environ["TORCH_NUM_INTEROP_THREADS"]))
+
     # Output directory
     os.makedirs(config["result_dir"], exist_ok=True)
     os.makedirs(os.path.join(config["result_dir"], "valid"), exist_ok=True)
@@ -82,11 +96,12 @@ if __name__ == "__main__":
 
     # t-SNE
     label_to_name_dict = dict(dataset.idx_to_style)
-    tsne_every = int(config.get("tsne_every", 1))
+    tsne_every = int(config.get("tsne_every", 10))
     tsne_max_samples = int(config.get("tsne_max_samples", 1000))
 
     # Model
-    model_cfg = config['model']
+    model_cfg = dict(config['model'])
+    model_cfg.pop("class", None)
     model = Text2StylizedMotion(model_cfg).to(device)
     style_names = [dataset.idx_to_style[i] for i in range(len(dataset.idx_to_style))]
     model.set_style_text_prior(style_names)
@@ -196,8 +211,7 @@ if __name__ == "__main__":
 
             total_loss.backward()
             optimizer.step()
-
-            pbar.set_postfix(loss=float((total_loss).item()))
+            pbar.set_postfix(loss=float(total_loss.item()))
 
             all_losses = {}
             all_losses.update(losses)

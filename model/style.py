@@ -95,22 +95,16 @@ class StyleMLP(nn.Module):
             nn.Linear(style_dim, style_dim),
         )
 
-    def forward(self, x, mask=None):
+    def forward(self, x, mask):
         B, T, J, C = x.shape                  # x: [B, T, J, C]
         style = self.mlp(x)                   # [B, T, J, D]
-
-        if mask is not None:
-            # mask: [B, T]  → repeat for joints & dim
-            valid = mask[:, :, None, None]    # [B, T, 1, 1]
-            style = style * valid.float()     # zero out invalid tokens
-
-            # pooling only over valid frames
-            num = style.sum(dim=(1, 2))       # [B, D]
-            den = valid.sum(dim=(1, 2)).clamp(min=1e-5)  # [B, 1]
-            pooled = num / den                # [B, D]
-        else:
-            # simple mean pooling if no mask
-            pooled = style.mean(dim=(1, 2))   # [B, D]
+        if mask is None:
+            raise ValueError("StyleMLP.forward requires a non-None mask.")
+        valid = mask[:, :, None, None]    # [B, T, 1, 1]
+        style = style * valid.float()     # zero out invalid tokens
+        num = style.sum(dim=(1, 2))       # [B, D]
+        den = valid.sum(dim=(1, 2)).clamp(min=1e-5)  # [B, 1]
+        pooled = num / den                # [B, D]
         return pooled
 
 

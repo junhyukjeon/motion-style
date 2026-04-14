@@ -1,7 +1,7 @@
 # --- Run Management --- #
 run_name: auto
 result_dir: ./results
-checkpoint_dir: ./checkpoints/t2sm
+checkpoint_dir: ./checkpoints/t2sm_controlnet
 random_seed: 42
 
 # --- Dataset --- #
@@ -29,30 +29,17 @@ sampler:
 # --- Model --- #
 model:
   denoiser:
-    class: HyperLoRADenoiser
+    class: ControlNetDenoiser
+    controlnet:
+      style_dim: 256
+      freeze_backbone: true
     transformer:
       layer:
         attention:
-          skeletal:
-            lora:
-              class: HyperLoRA
-              rank: 2
-              scale: 1.0
-              style_dim: 256
-              num_layers: 4
-              in_dim: 256
-              out_dim: 256
-              hidden_dim: 512
-              targets: [v, o]
-              block:
-                dropout: 0.1
-                style_dim: 256
-                hidden_dim: 512
-                num_heads: 8
+          skeletal: {}
           temporal: {}
           cross: {}
         film: {}
-
   style_encoder:
     class: StyleMLP
     style_dim: 256

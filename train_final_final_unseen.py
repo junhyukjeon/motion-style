@@ -124,7 +124,8 @@ if __name__ == "__main__":
     train_loader_hml    = DataLoader(hml_train, batch_size=sampler_cfg["batch_size"], shuffle=True, drop_last=True)
 
     # --- Model --- #
-    model_cfg = config['model']
+    model_cfg = dict(config['model'])
+    model_cfg.pop("class", None)
     model = Text2StylizedMotion(model_cfg).to(device)
     optimizer = torch.optim.Adam(
         (p for p in model.parameters() if p.requires_grad),

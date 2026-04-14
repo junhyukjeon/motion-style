@@ -5,43 +5,40 @@ checkpoint_dir: ./checkpoints/t2sm
 random_seed: 42
 
 # --- Dataset --- #
-dataset_style:
+dataset:
+  class: Dataset100STYLE
+  motion_ids  : ./dataset/100style/train_100STYLE_Full.txt
   motion_dir  : ./dataset/100style/new_joint_vecs
-  text_dir    : ./dataset/100style/texts
   mean_path   : ./checkpoints/t2m/Comp_v6_KLD005/meta/mean.npy
   std_path    : ./checkpoints/t2m/Comp_v6_KLD005/meta/std.npy
   style_json  : ./dataset/100style/100style_smoodi.json
   content_json: ./dataset/100style/10content_smoodi.json
+  excluded_styles: []
   unit_length : 4
   min_frames  : 40
   max_frames  : 196
-  drop_first_frame: True
+  drop_first_frame: False
   unit_double_prob: 0.3333
-
-dataset_hml:
-  split_base_train: ./dataset/humanml3d/train_random_humanml.txt
-  split_base_valid: ./dataset/humanml3d/valid_random_humanml.txt
-  mean_path       : ./checkpoints/t2m/Comp_v6_KLD005/meta/mean.npy
-  std_path        : ./checkpoints/t2m/Comp_v6_KLD005/meta/std.npy
-  unit_length     : 4
-  min_frames      : 40
-  max_frames      : 196
 
 # --- Sampler Settings --- #
 sampler:
-  type: TrainSampler
+  class: TrainSampler
   batch_size: 64
   samples_per_style: 4
 
 # --- Model --- #
 model:
   denoiser:
+    class: HyperLoRADenoiser
     transformer:
       layer:
-        attention: {}
+        attention:
+          skeletal: {}
+          temporal: {}
+          cross: {}
         film:
           lora:
-            type: HyperLoRA
+            class: HyperLoRA
             rank: 2
             scale: 1.0
             style_dim: 256
@@ -55,41 +52,28 @@ model:
               hidden_dim: 512
               num_heads: 8
   style_encoder:
-    type: StyleMLP
-    dropout: 0.1
+    class: StyleMLP
     style_dim: 256
-    num_layers: 4
-    block:
-      dropout: 0.1
-      style_dim: 256
-      hidden_dim: 512
-      num_heads: 8
-      repeats: 2
   text_drop: 0.1
-  style_drop: 0.1
   text_weight: 7.5
   style_weight: 1.5
   style_guidance: 0.75
 
 # --- Losses --- #
 loss:
-  style: 
+  style:
     weight: 1.0
   supcon:
     weight: 1.0
     temperature: 0.07
 
-# --- Early Stopper --- #
-early:
-  patience: 10
-  min_delta: 0.0
-  mode: min
-
 # --- Calibration --- #
-steps: 34
+steps: 100
 tau: 0.001
 
 # --- Training --- #
 epochs: 100
 lr: 0.0001
-valid_size: 0.5
+save_every: 10
+tsne_every: 10
+tsne_max_samples: 1000

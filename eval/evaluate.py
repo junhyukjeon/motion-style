@@ -154,22 +154,34 @@ class SmoodiEval():
     def __init__(self, config, device="cuda:0"):
 
         self.device = device
+        classifier_path = config.get(
+            "style_classifier_path",
+            "./checkpoints/style_classifier/style_classifier.pt",
+        )
+        classifier_nclasses = int(config.get("style_classifier_nclasses", 47))
+        style_name_dict_path = config.get(
+            "style_name_dict_path",
+            "./dataset/100style/100STYLE_name_dict_Filter.txt",
+        )
         
         # model
         self.model = Text2StylizedMotion(config["model"]).to(device)
+        ckpt_path = pjoin(config["checkpoint_dir"], "epoch_0100.ckpt")
+        if not os.path.isfile(ckpt_path):
+            ckpt_path = pjoin(config["checkpoint_dir"], "epoch_0100.ckpt")
         self.model.load_state_dict(
-            torch.load(pjoin(config["checkpoint_dir"], "latest.ckpt"), map_location=device, weights_only=True), strict=False
+            torch.load(ckpt_path, map_location=device, weights_only=True), strict=False
         )
         self.model.eval()
         for p in self.model.parameters():
             p.requires_grad = False
 
         # style classifier
-        self.classifier = StyleClassification(nclasses=47).to(device)
+        self.classifier = StyleClassification(nclasses=classifier_nclasses).to(device)
         self.classifier.load_state_dict(
-            torch.load("./checkpoints/style_classifier/style_classifier.pt", map_location=device, weights_only=True)
+            torch.load(classifier_path, map_location=device, weights_only=True)
         )
-        self.label_to_motion = build_dict_from_txt("./dataset/100style/100STYLE_name_dict_Filter.txt")
+        self.label_to_motion = build_dict_from_txt(style_name_dict_path)
 
         # metrics
         self.metrics = TM2TMetrics().to(device)
@@ -372,6 +384,12 @@ def load_config():
                         help='Override config.model.style_guidance at runtime')
     parser.add_argument('--csv_name', type=str, default=None,
                         help='CSV filename to write results to (e.g., metrics_style0.5.csv)')
+    parser.add_argument('--style_classifier_path', type=str, default=None,
+                        help='Override the style classifier checkpoint used for evaluation')
+    parser.add_argument('--style_classifier_nclasses', type=int, default=None,
+                        help='Override the number of output classes in the style classifier')
+    parser.add_argument('--style_name_dict_path', type=str, default=None,
+                        help='Override the style label-to-name dictionary used for evaluation')
     args = parser.parse_args()
 
     from pathlib import Path
@@ -404,6 +422,15 @@ def load_config():
 
     if args.csv_name is not None:
         config["csv_name"] = args.csv_name  # store for use later
+
+    if args.style_classifier_path is not None:
+        config["style_classifier_path"] = args.style_classifier_path
+
+    if args.style_classifier_nclasses is not None:
+        config["style_classifier_nclasses"] = args.style_classifier_nclasses
+
+    if args.style_name_dict_path is not None:
+        config["style_name_dict_path"] = args.style_name_dict_path
 
     return config
 

@@ -163,7 +163,8 @@ def main():
     )
 
     # --- Build model & load checkpoint ---
-    model_cfg = config["model"]
+    model_cfg = dict(config["model"])
+    model_cfg.pop("class", None)
     model = Text2StylizedMotion(model_cfg)
 
     # Resolve ckpt path: allow either full path or just filename under checkpoint_dir

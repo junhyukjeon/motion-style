@@ -4,40 +4,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from salad.models.denoiser.transformer import MultiheadAttention
 
-# class HyperLoRA(nn.Module):
-#     def __init__(self, config):
-#         super().__init__()
-#         self.rank      = config["rank"]
-#         self.scale     = config["scale"]
-#         self.style_dim = config["style_dim"]
-#         self.in_dim    = config["in_dim"]
-#         self.out_dim   = config["out_dim"]
-
-#         self.norm = nn.LayerNorm(self.style_dim)
-#         self.head_A = nn.Linear(self.style_dim, self.rank * self.in_dim)
-#         self.head_B = nn.Linear(self.style_dim, self.out_dim * self.rank)
-
-#         # near-zero init
-#         with torch.no_grad():
-#             self.head_A.weight.normal_(0, 1e-4)
-#             self.head_A.bias.zero_()
-#             self.head_B.weight.normal_(0, 1e-4)
-#             self.head_B.bias.zero_()
-
-#     def forward(self, style, len_mask=None):
-#         B, D = style.shape
-#         x = self.norm(style)
-#         r = self.rank
-#         A  = self.head_A(x).reshape(B, r, self.in_dim)      # (B, r, in_dim)
-#         Bm = self.head_B(x).reshape(B, self.out_dim, r)     # (B, out_dim, r)
-#         return A, Bm
-
-
 class HyperLoRA(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.rank      = config["rank"]
-        self.scale     = config["scale"]      # kept for consistency, used wherever you apply A,B
+        self.scale     = config["scale"]
         self.style_dim = config["style_dim"]
         self.in_dim    = config["in_dim"]
         self.out_dim   = config["out_dim"]
@@ -72,44 +43,51 @@ class HyperLoRA(nn.Module):
         nn.init.zeros_(self.head_B[-1].weight)
         nn.init.zeros_(self.head_B[-1].bias)
 
+        # For inference
+        self.cache_enabled = False
+        self._cached_style_key = None
+        self._cached_A = None
+        self._cached_B = None
+
+    def enable_cache(self, enabled=True):
+        self.cache_enabled = enabled
+        if not enabled:
+            self.clear_cache()
+
+    def clear_cache(self):
+        self._cached_style_key = None
+        self._cached_A = None
+        self._cached_B = None
+
+    def _style_cache_key(self, style):
+        if style.requires_grad:
+            return None
+        return (
+            style.data_ptr(),
+            tuple(style.shape),
+            style.device.type,
+            style.device.index,
+            str(style.dtype),
+        )
+
     def forward(self, style, len_mask=None):
+        style_key = self._style_cache_key(style) if self.cache_enabled else None
+        if style_key is not None and style_key == self._cached_style_key:
+            return self._cached_A, self._cached_B
+
         B, D = style.shape
         x = self.project(style)
         hA = x
         hB = x
         A  = self.head_A(hA).view(B, self.rank, self.in_dim)
         Bm = self.head_B(hB).view(B, self.out_dim, self.rank)
+
+        if style_key is not None:
+            self._cached_style_key = style_key
+            self._cached_A = A.detach()
+            self._cached_B = Bm.detach()
+
         return A, Bm
-
-
-# class HyperLoRA(nn.Module):
-#     def __init__(self, config): 
-#         super().__init__()
-#         self.rank       = config["rank"]
-#         self.scale      = config["scale"]
-#         self.style_dim  = config["style_dim"]
-#         self.in_dim     = config["in_dim"]
-#         self.out_dim    = config["out_dim"]
-#         self.hidden_dim = config["hidden_dim"]
-
-#         out_A = self.rank * self.in_dim
-#         out_B = self.out_dim * self.rank
-#         self.hyperA = nn.Sequential(nn.SiLU(), nn.Linear(self.style_dim, self.hidden_dim), nn.SiLU(), nn.Linear(self.hidden_dim, out_A))
-#         self.hyperB = nn.Sequential(nn.SiLU(), nn.Linear(self.style_dim, self.hidden_dim), nn.SiLU(), nn.Linear(self.hidden_dim, out_B))
-
-#         nn.init.kaiming_uniform_(self.hyperA[-1].weight, a=math.sqrt(5))
-#         nn.init.zeros_(self.hyperA[-1].bias)
-#         nn.init.zeros_(self.hyperB[-1].weight)
-#         nn.init.zeros_(self.hyperB[-1].bias)
-
-#     def forward(self, z, style):
-#         batch_size = z.shape[0]
-#         A = self.hyperA(style).view(batch_size, self.rank, self.in_dim)
-#         B = self.hyperB(style).view(batch_size, self.out_dim, self.rank)
-
-#         tmp   = torch.einsum('bnd,brd->bnr', z, A)
-#         delta = torch.einsum('bod,bnr->bno', B, tmp)
-#         return self.scale * delta
 
 
 # --- StyleLoRA --- #

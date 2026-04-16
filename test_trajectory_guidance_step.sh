@@ -10,6 +10,7 @@ OUTPUT_LENGTH="${OUTPUT_LENGTH:-140}"
 RADIUS="${RADIUS:-1.0}"
 TURNS="${TURNS:-1.0}"
 NUM_SAMPLES="${NUM_SAMPLES:-4}"
+NUM_INFERENCE_STEPS="${NUM_INFERENCE_STEPS:-50}"
 GUIDANCE_STEPS="${GUIDANCE_STEPS:-1}"
 RECOMPUTE_GUIDED_V_PRED="${RECOMPUTE_GUIDED_V_PRED:-0}"
 PRINT_STEP_TRAJECTORY_LOSS="${PRINT_STEP_TRAJECTORY_LOSS:-1}"
@@ -27,7 +28,7 @@ run_case() {
   local style_schedule="$9"
 
   echo
-  echo "=== Running trajectory sweep case: ${run_tag} ==="
+  echo "=== Running step-guided trajectory case: ${run_tag} ==="
 
   local extra_args=()
   if [[ "$PRINT_STEP_TRAJECTORY_LOSS" == "1" ]]; then
@@ -45,6 +46,7 @@ run_case() {
     --radius "$RADIUS" \
     --turns "$TURNS" \
     --num_samples "$NUM_SAMPLES" \
+    --num_inference_steps "$NUM_INFERENCE_STEPS" \
     --trajectory_weight "$traj_weight" \
     --trajectory_start_frac "$traj_start" \
     --trajectory_end_frac "$traj_end" \
@@ -59,84 +61,37 @@ run_case() {
     "${extra_args[@]}"
 }
 
-run_zt_case() {
-  local run_tag="$1"
-  local traj_weight="$2"
-  local noise_opt_steps="$3"
-  local noise_opt_lr="$4"
-  local num_inference_steps="$5"
-
-  echo
-  echo "=== Running initial-z_T optimization case: ${run_tag} ==="
-
-  local extra_args=()
-  if [[ "$PRINT_STEP_TRAJECTORY_LOSS" == "1" ]]; then
-    extra_args+=(--print_step_trajectory_loss)
-  fi
-  if [[ "$RECOMPUTE_GUIDED_V_PRED" == "1" ]]; then
-    extra_args+=(--recompute_guided_v_pred)
-  fi
-
-  python "$SCRIPT_DIR/test_trajectory_guidance.py" \
-    --config "$CONFIG" \
-    --ref_motion_id "$REF_MOTION_ID" \
-    --caption "$CAPTION" \
-    --output_length "$OUTPUT_LENGTH" \
-    --radius "$RADIUS" \
-    --turns "$TURNS" \
-    --num_samples "$NUM_SAMPLES" \
-    --trajectory_weight "$traj_weight" \
-    --style_guidance_weight "0.0" \
-    --num_inference_steps "$num_inference_steps" \
-    --optimize_initial_noise_only \
-    --noise_opt_steps "$noise_opt_steps" \
-    --noise_opt_lr "$noise_opt_lr" \
-    --seed "$SEED" \
-    --run_tag "$run_tag" \
-    "${extra_args[@]}"
-}
-
-# Baseline: no style guidance, constant trajectory pressure everywhere.
+# Baseline: trajectory guidance only, active across the full diffusion chain.
 run_case \
-  "baseline_const_full_style0" \
+  "step_const_full_style0" \
   "5.0" "0.0" "1.0" "constant" \
   "0.0" "0.0" "1.0" "constant"
 
-# Strong global push early, fades later.
+# Emphasize earlier denoising steps, then fade out.
 run_case \
-  "traj_early_linear_decay_style0" \
+  "step_early_linear_decay_style0" \
   "5.0" "0.0" "0.7" "linear_decay" \
   "0.0" "0.0" "1.0" "constant"
 
-# Global guidance concentrated in early-mid timesteps.
+# Concentrate pressure in the early-middle portion of diffusion.
 run_case \
-  "traj_earlymid_bell_style0" \
+  "step_earlymid_bell_style0" \
   "5.0" "0.0" "0.8" "bell" \
   "0.0" "0.0" "1.0" "constant"
 
-# Early guidance with a smoother decay.
+# Smooth early emphasis with cosine decay.
 run_case \
-  "traj_early_cosine_decay_style0" \
+  "step_early_cosine_decay_style0" \
   "5.0" "0.0" "0.6" "cosine_decay" \
   "0.0" "0.0" "1.0" "constant"
 
-# Compare against keeping style guidance on in the later half.
+# Keep some style guidance alive in the later half for comparison.
 run_case \
-  "traj_early_decay_style_late" \
+  "step_early_decay_style_late" \
   "5.0" "0.0" "0.7" "linear_decay" \
   "0.75" "0.4" "1.0" "linear_ramp"
 
-# Optimize only the starting z_T against the final trajectory loss.
-run_zt_case \
-  "zt_only_opt10_lr5em2_n50" \
-  "5.0" "10" "0.05" "50"
-
-# Same idea, but a bit more optimization pressure.
-run_zt_case \
-  "zt_only_opt20_lr2em2_n50" \
-  "5.0" "20" "0.02" "50"
-
 echo
-echo "Trajectory sweep finished."
+echo "Step-guided trajectory sweep finished."
 echo "Outputs are saved under:"
 echo "  $SCRIPT_DIR/results/ours/guidance_tests/trajectory/"

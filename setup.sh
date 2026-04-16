@@ -1,5 +1,7 @@
 cp -r ./style /opt/conda/envs/style
 
+bash ./link_runtime_assets.sh
+
 apt-get update
 apt-get install ffmpeg
 rm /opt/conda/bin/ffmpeg

@@ -1,6 +1,5 @@
 import argparse
 import os
-import random
 
 import numpy as np
 import torch
@@ -34,14 +33,14 @@ def parse_args():
     parser.add_argument(
         "--joint_names",
         type=str,
-        default="pelvis,left_wrist,right_wrist,left_ankle,right_ankle",
+        default="pelvis,left_wrist,right_wrist,left_foot,right_foot",
         help="Comma-separated joint names to constrain.",
     )
     parser.add_argument(
         "--source_motion_ids",
         type=str,
         default="",
-        help="Optional comma-separated source motion ids to pull keyframes from. If omitted, random 100STYLE motions are used.",
+        help="Optional comma-separated source motion ids to pull keyframes from. If omitted, keyframes are taken from the style reference motion.",
     )
     parser.add_argument("--keyframe_weight", type=float, default=8.0, help="Keyframe guidance weight.")
     parser.add_argument("--keyframe_start_frac", type=float, default=0.0, help="Keyframe guidance start fraction in denoising.")
@@ -69,20 +68,19 @@ def parse_args():
         help="Style guidance schedule within its active timestep window.",
     )
     parser.add_argument("--guidance_steps", type=int, default=1, help="Inner guidance steps per diffusion step.")
+    parser.add_argument(
+        "--recompute_guided_v_pred",
+        action="store_true",
+        help="After latent guidance, recompute v_pred from the guided latent before the DDIM step.",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     return parser.parse_args()
 
 
-def choose_source_motion_ids(dataset, ref_motion_id: str, requested_ids, num_keyframes: int):
+def choose_source_motion_ids(ref_motion_id: str, requested_ids, num_keyframes: int):
     if requested_ids:
-        return [str(mid) for mid in requested_ids]
-
-    pool = [item["motion_id"] for item in dataset.items if item["motion_id"] != str(ref_motion_id)]
-    if not pool:
-        raise RuntimeError("No candidate source motions available for keyframe sampling.")
-    if len(pool) >= num_keyframes:
-        return random.sample(pool, num_keyframes)
-    return [random.choice(pool) for _ in range(num_keyframes)]
+        return [str(mid) for mid in requested_ids], {"mode": "manual"}
+    return [str(ref_motion_id)] * num_keyframes, {"mode": "style_reference"}
 
 
 def build_keyframe_targets(dataset, source_motion_ids, output_length, joint_indices, device, mean, std):
@@ -94,6 +92,7 @@ def build_keyframe_targets(dataset, source_motion_ids, output_length, joint_indi
     mask = torch.zeros(1, num_keyframes, 22, dtype=torch.bool, device=device)
     source_records = []
     source_videos = []
+    source_motions = []
 
     for k, motion_id in enumerate(source_motion_ids):
         src_motion_norm, src_len = get_full_motion(dataset, motion_id, device)
@@ -114,6 +113,13 @@ def build_keyframe_targets(dataset, source_motion_ids, output_length, joint_indi
             }
         )
         source_videos.append((str(motion_id), src_joints[:src_len].detach().cpu().numpy()))
+        source_motions.append(
+            {
+                "motion_id": str(motion_id),
+                "motion_real": src_motion_real[0, :src_len].detach().cpu().numpy(),
+                "joints": src_joints[:src_len].detach().cpu().numpy(),
+            }
+        )
 
     return (
         torch.tensor(out_frames, dtype=torch.long, device=device),
@@ -121,6 +127,7 @@ def build_keyframe_targets(dataset, source_motion_ids, output_length, joint_indi
         mask,
         source_records,
         source_videos,
+        source_motions,
     )
 
 
@@ -144,8 +151,12 @@ def main():
     captions = [args.caption] * args.num_samples
 
     requested_ids = [s.strip() for s in args.source_motion_ids.split(",") if s.strip()]
-    source_motion_ids = choose_source_motion_ids(dataset, args.ref_motion_id, requested_ids, args.num_keyframes)
-    key_frames, key_targets, key_mask, source_records, source_videos = build_keyframe_targets(
+    source_motion_ids, source_selection = choose_source_motion_ids(
+        args.ref_motion_id,
+        requested_ids,
+        args.num_keyframes,
+    )
+    key_frames, key_targets, key_mask, source_records, source_videos, source_motions = build_keyframe_targets(
         dataset=dataset,
         source_motion_ids=source_motion_ids,
         output_length=args.output_length,
@@ -157,6 +168,7 @@ def main():
 
     guidance = {
         "steps": args.guidance_steps,
+        "recompute_v_guided": bool(args.recompute_guided_v_pred),
         "style": {
             "start_frac": args.style_start_frac,
             "end_frac": args.style_end_frac,
@@ -216,7 +228,9 @@ def main():
             "style_end_frac": args.style_end_frac,
             "style_schedule": args.style_schedule,
             "guidance_steps": args.guidance_steps,
+            "recompute_guided_v_pred": bool(args.recompute_guided_v_pred),
             "seed": args.seed,
+            "source_selection": source_selection,
             "source_records": source_records,
         },
     )
@@ -224,6 +238,16 @@ def main():
     np.save(os.path.join(out_dir, "keyframe_target_joints.npy"), key_targets.detach().cpu().numpy())
     np.save(os.path.join(out_dir, "keyframe_mask.npy"), key_mask.detach().cpu().numpy())
     np.save(os.path.join(out_dir, "stylized_motion.npy"), stylized_real.detach().cpu().numpy())
+    keyframe_motion = np.full((args.output_length, 22, 3), np.nan, dtype=np.float32)
+    keyframe_motion_mask = np.zeros((args.output_length, 22), dtype=bool)
+    keyframe_frames_np = key_frames.detach().cpu().numpy()
+    keyframe_target_np = key_targets[0].detach().cpu().numpy()
+    keyframe_mask_np = key_mask[0].detach().cpu().numpy()
+    for i, frame_idx in enumerate(keyframe_frames_np):
+        keyframe_motion[frame_idx, keyframe_mask_np[i]] = keyframe_target_np[i, keyframe_mask_np[i]]
+        keyframe_motion_mask[frame_idx] = keyframe_mask_np[i]
+    np.save(os.path.join(out_dir, "keyframe_motion.npy"), keyframe_motion)
+    np.save(os.path.join(out_dir, "keyframe_motion_mask.npy"), keyframe_motion_mask)
 
     ref_len = min(style_length, style_motion.shape[0])
     save_motion_video(
@@ -242,6 +266,10 @@ def main():
             title=f"source {motion_id}",
             fps=20,
         )
+    for source_motion in source_motions:
+        motion_id = source_motion["motion_id"]
+        np.save(os.path.join(sources_dir, f"{motion_id}_motion.npy"), source_motion["motion_real"].astype(np.float32))
+        np.save(os.path.join(sources_dir, f"{motion_id}_joints.npy"), source_motion["joints"].astype(np.float32))
 
     for idx in range(args.num_samples):
         sample_len = int(output_lengths[idx].item())

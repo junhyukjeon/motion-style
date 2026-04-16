@@ -268,7 +268,10 @@ class SmoodiEval():
 
         ref_t2m = self.data_loader.dataset.renorm4t2m(reference_motion)
         start = time.time()
-        feats_rst_t2m = self.model.generate(ref_t2m, texts, lengths, lengths2)[0]
+        guidance = None
+        if self.config.get("model", {}).get("recompute_v_guided", False):
+            guidance = {"recompute_v_guided": True}
+        feats_rst_t2m = self.model.generate(ref_t2m, texts, lengths, lengths2, guidance=guidance)[0]
         end = time.time()
 
         feats_rst = self.data_loader.dataset.renorm4style(feats_rst_t2m)
@@ -390,6 +393,8 @@ def load_config():
                         help='Override the number of output classes in the style classifier')
     parser.add_argument('--style_name_dict_path', type=str, default=None,
                         help='Override the style label-to-name dictionary used for evaluation')
+    parser.add_argument('--recompute_guided_v_pred', action='store_true',
+                        help='Recompute v_pred from the guided latent before each DDIM step during generation')
     args = parser.parse_args()
 
     from pathlib import Path
@@ -419,6 +424,11 @@ def load_config():
         if "model" not in config or not isinstance(config["model"], dict):
             config["model"] = {}
         config["model"]["style_guidance"] = args.style_guidance
+
+    if args.recompute_guided_v_pred:
+        if "model" not in config or not isinstance(config["model"], dict):
+            config["model"] = {}
+        config["model"]["recompute_v_guided"] = True
 
     if args.csv_name is not None:
         config["csv_name"] = args.csv_name  # store for use later

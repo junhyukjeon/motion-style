@@ -153,6 +153,11 @@ def build_joint_name_map() -> Dict[str, int]:
             idx = humanml3d_joints.index(code)
             name_to_idx[readable.lower()] = idx
     name_to_idx["pelvis"] = humanml3d_joints.index("root")
+    # Common aliases that are easier to guess than the dataset's canonical names.
+    if "left_foot" in name_to_idx:
+        name_to_idx["left_ankle"] = name_to_idx["left_foot"]
+    if "right_foot" in name_to_idx:
+        name_to_idx["right_ankle"] = name_to_idx["right_foot"]
     return name_to_idx
 
 

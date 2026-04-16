@@ -77,6 +77,16 @@ def parse_args():
         help="Number of DDIM denoising steps used for sampling and z_T-only optimization rollouts.",
     )
     parser.add_argument("--guidance_steps", type=int, default=1, help="Inner guidance steps per diffusion step.")
+    parser.add_argument(
+        "--recompute_guided_v_pred",
+        action="store_true",
+        help="After latent guidance, recompute v_pred from the guided latent before the DDIM step.",
+    )
+    parser.add_argument(
+        "--print_step_trajectory_loss",
+        action="store_true",
+        help="Print and save the batch-mean trajectory loss estimated at each diffusion timestep.",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     return parser.parse_args()
 
@@ -111,6 +121,8 @@ def main():
     guidance = {
         "steps": args.guidance_steps,
         "num_inference_steps": args.num_inference_steps,
+        "record_step_trajectory_loss": bool(args.print_step_trajectory_loss),
+        "recompute_v_guided": bool(args.recompute_guided_v_pred),
         "style": {
             "start_frac": args.style_start_frac,
             "end_frac": args.style_end_frac,
@@ -149,6 +161,7 @@ def main():
             style_lengths,
             guidance=guidance,
         )
+    debug_info = model.get_last_debug_info()
 
     stylized_real = denormalize_motion(stylized_norm, mean, std)
     reference_real = denormalize_motion(style_batch, mean, std)
@@ -205,10 +218,29 @@ def main():
             "noise_opt_lr": args.noise_opt_lr,
             "num_inference_steps": args.num_inference_steps,
             "guidance_steps": args.guidance_steps,
+            "recompute_guided_v_pred": bool(args.recompute_guided_v_pred),
+            "print_step_trajectory_loss": bool(args.print_step_trajectory_loss),
             "seed": args.seed,
             "optimization_history": None if opt_info is None else opt_info["history"],
         },
     )
+    if args.print_step_trajectory_loss:
+        step_losses = debug_info.get("step_trajectory_losses", [])
+        save_json(os.path.join(out_dir, "step_trajectory_losses.json"), step_losses)
+        print("\nPer-timestep trajectory loss:")
+        for row in step_losses:
+            step_idx = row.get("step_idx")
+            step_idx_str = "?" if step_idx is None else str(step_idx)
+            step_frac = row.get("step_frac")
+            step_frac_str = "?" if step_frac is None else f"{step_frac:.3f}"
+            traj_loss = row.get("trajectory_loss")
+            traj_loss_str = "None" if traj_loss is None else f"{traj_loss:.6f}"
+            weight = row.get("trajectory_weight")
+            weight_str = "" if weight is None else f" weight={weight:.6f}"
+            print(
+                f"  step={step_idx_str:>2} timestep={row['timestep']:>4} "
+                f"frac={step_frac_str} traj_loss={traj_loss_str}{weight_str}"
+            )
     np.save(os.path.join(out_dir, "target_trajectory.npy"), target_xz_np)
     np.save(os.path.join(out_dir, "generated_root_xz.npy"), root_xz)
     np.save(os.path.join(out_dir, "stylized_motion.npy"), stylized_real.detach().cpu().numpy())

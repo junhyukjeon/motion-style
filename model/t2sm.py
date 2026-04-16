@@ -63,6 +63,7 @@ class Text2StylizedMotion(nn.Module):
         self.register_buffer("style_affinity", torch.empty(0), persistent=False)
         self.register_buffer("motion_mean", torch.empty(0), persistent=False)
         self.register_buffer("motion_std", torch.empty(0), persistent=False)
+        self.last_debug_info: Dict[str, Any] = {}
 
     @torch.no_grad()
     def set_style_text_prior(self, style_names):
@@ -83,6 +84,9 @@ class Text2StylizedMotion(nn.Module):
         std_t = torch.as_tensor(std, device=self.device, dtype=torch.float32)
         self.motion_mean = mean_t.view(-1)
         self.motion_std = std_t.view(-1)
+
+    def get_last_debug_info(self) -> Dict[str, Any]:
+        return dict(self.last_debug_info)
         
     def _recover_x0_from_v(self, x_t, v_pred, timesteps):
         """
@@ -243,7 +247,8 @@ class Text2StylizedMotion(nn.Module):
         )
         z = torch.randn(ctx["z_shape"], device=self.device, dtype=torch.float32)
         z = z * self.scheduler.init_noise_sigma
-        stylized_motion = self._generate_from_noise_with_step_guidance(z, ctx, guidance)
+        stylized_motion, debug_info = self._generate_from_noise_with_step_guidance(z, ctx, guidance)
+        self.last_debug_info = debug_info
         return stylized_motion, text
 
     def generate_with_optimized_initial_noise(
@@ -271,12 +276,13 @@ class Text2StylizedMotion(nn.Module):
         z = nn.Parameter(z)
         optim = torch.optim.Adam([z], lr=float(noise_opt_lr))
         history = []
+        record_step_losses = bool(guidance.get("record_step_trajectory_loss", False))
 
         self.denoiser.enable_hyper_lora_cache(True)
         try:
             for opt_step in tqdm(range(max(1, int(noise_opt_steps))), desc="Optimize initial noise"):
                 optim.zero_grad(set_to_none=True)
-                stylized_motion = self._rollout_from_noise(z, ctx)
+                stylized_motion, _ = self._rollout_from_noise(z, ctx)
                 total_loss, loss_dict = self._final_motion_guidance_loss(
                     stylized_motion=stylized_motion,
                     lengths=ctx["lengths"],
@@ -295,12 +301,22 @@ class Text2StylizedMotion(nn.Module):
                 history.append(record)
 
             with torch.no_grad():
-                stylized_motion = self._rollout_from_noise(z.detach(), ctx)
+                stylized_motion, rollout_debug = self._rollout_from_noise(
+                    z.detach(),
+                    ctx,
+                    guidance=guidance if record_step_losses else None,
+                    record_step_trajectory_loss=record_step_losses,
+                )
         finally:
             self.denoiser.enable_hyper_lora_cache(False)
             self.denoiser.clear_hyper_lora_cache()
 
-        return stylized_motion, text, {"history": history, "optimized_noise": z.detach()}
+        self.last_debug_info = rollout_debug if record_step_losses else {}
+        return stylized_motion, text, {
+            "history": history,
+            "optimized_noise": z.detach(),
+            "step_trajectory_losses": rollout_debug.get("step_trajectory_losses", []) if record_step_losses else [],
+        }
 
     def _prepare_sampling_context(self, motion, text, lengths, style_lengths, num_inference_steps=50):
         motion = motion.to(self.device)  # style motion
@@ -376,18 +392,33 @@ class Text2StylizedMotion(nn.Module):
         pred_uncond, pred_text, pred_style = pred_all.chunk(3, dim=0)
         return pred_uncond + self.config['text_weight'] * (pred_text - pred_uncond) + self.config['style_weight'] * (pred_style - pred_text)
 
-    def _rollout_from_noise(self, z_init, ctx):
+    def _rollout_from_noise(self, z_init, ctx, guidance=None, record_step_trajectory_loss=False):
+        guidance = guidance or {}
         z = z_init
+        debug_info = {"step_trajectory_losses": []}
         for timestep in ctx["timesteps"]:
             v_pred = self._predict_v(z, timestep, ctx)
+            if record_step_trajectory_loss:
+                debug_info["step_trajectory_losses"].append(
+                    self._build_step_trajectory_record(
+                        z=z.detach(),
+                        v_pred=v_pred.detach(),
+                        timestep=timestep,
+                        len_mask=ctx["len_mask"],
+                        motion_len_mask=ctx["motion_len_mask"],
+                        trajectory_cfg=guidance.get("trajectory"),
+                    )
+                )
             z = self.scheduler.step(v_pred, timestep, z).prev_sample
         stylized_motion = self.vae.decode(z)
-        return stylized_motion * ctx["motion_len_mask"][..., None].float()
+        return stylized_motion * ctx["motion_len_mask"][..., None].float(), debug_info
 
     def _generate_from_noise_with_step_guidance(self, z, ctx, guidance):
         style_cfg = guidance.get("style", {})
         trajectory_cfg = guidance.get("trajectory")
         keyframe_cfg = guidance.get("keyframe", guidance.get("keyframes"))
+        record_step_losses = bool(guidance.get("record_step_trajectory_loss", False))
+        recompute_v_guided = bool(guidance.get("recompute_v_guided", False))
 
         style_guidance_scale = float(style_cfg.get("weight", self.config.get("style_guidance", 0.1)))
         guidance_steps = max(1, int(guidance.get("steps", self.config.get("style_guidance_steps", 1))))
@@ -395,6 +426,7 @@ class Text2StylizedMotion(nn.Module):
         use_style_guidance = style_guidance_scale > 0.0
         use_trajectory_guidance = trajectory_cfg is not None and trajectory_cfg.get("target") is not None
         use_keyframe_guidance = keyframe_cfg is not None and keyframe_cfg.get("target") is not None
+        debug_info = {"step_trajectory_losses": []}
 
         self.denoiser.enable_hyper_lora_cache(True)
         try:
@@ -450,14 +482,35 @@ class Text2StylizedMotion(nn.Module):
                 else:
                     z_step = z_in
 
+                if recompute_v_guided and use_sampling_guidance_now:
+                    with torch.no_grad():
+                        v_step = self._predict_v(z_step.detach(), timestep, ctx)
+                else:
+                    v_step = v_pred
+
+                if record_step_losses:
+                    debug_info["step_trajectory_losses"].append(
+                        self._build_step_trajectory_record(
+                            z=z_step.detach(),
+                            v_pred=v_step.detach(),
+                            timestep=timestep,
+                            len_mask=ctx["len_mask"],
+                            motion_len_mask=ctx["motion_len_mask"],
+                            trajectory_cfg=trajectory_cfg,
+                            step_idx=step_idx,
+                            step_frac=step_frac,
+                            trajectory_weight=trajectory_guidance_scale_t,
+                        )
+                    )
+
                 with torch.no_grad():
-                    z = self.scheduler.step(v_pred.detach(), timestep, z_step.detach()).prev_sample
+                    z = self.scheduler.step(v_step.detach(), timestep, z_step.detach()).prev_sample
         finally:
             self.denoiser.enable_hyper_lora_cache(False)
             self.denoiser.clear_hyper_lora_cache()
 
         stylized_motion = self.vae.decode(z)
-        return stylized_motion * ctx["motion_len_mask"][..., None].float()
+        return stylized_motion * ctx["motion_len_mask"][..., None].float(), debug_info
 
     def _final_motion_guidance_loss(self, stylized_motion, lengths, guidance):
         trajectory_cfg = guidance.get("trajectory")
@@ -707,6 +760,41 @@ class Text2StylizedMotion(nn.Module):
                 valid = valid.unsqueeze(-1)
             valid = valid & extra_mask
         return valid
+
+    def _build_step_trajectory_record(
+        self,
+        z,
+        v_pred,
+        timestep,
+        len_mask,
+        motion_len_mask,
+        trajectory_cfg=None,
+        step_idx=None,
+        step_frac=None,
+        trajectory_weight=None,
+    ):
+        record = {"timestep": int(timestep.item())}
+        if step_idx is not None:
+            record["step_idx"] = int(step_idx)
+        if step_frac is not None:
+            record["step_frac"] = float(step_frac)
+        if trajectory_weight is not None:
+            record["trajectory_weight"] = float(trajectory_weight)
+
+        if trajectory_cfg is None or trajectory_cfg.get("target") is None:
+            record["trajectory_loss"] = None
+            return record
+
+        with torch.no_grad():
+            t_b = timestep.expand(z.shape[0])
+            x0_hat = self._recover_x0_from_v(z, v_pred, t_b)
+            x0_hat = x0_hat * len_mask[..., None, None].float()
+            decoded_motion = self.vae.decode(x0_hat)
+            decoded_motion = decoded_motion * motion_len_mask[..., None].float()
+            traj_loss = self._trajectory_guidance_loss(decoded_motion, motion_len_mask, trajectory_cfg)
+
+        record["trajectory_loss"] = float(traj_loss.item())
+        return record
 
 
 def frames_to_mask(num_frames: torch.Tensor) -> torch.Tensor:

@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import yaml
 
-from data.dataset import Dataset100STYLE
+from data.dataset import Dataset100STYLE, DatasetHumanML3D
 from mld.data.humanml.utils.plot_script import plot_3d_motion
 from mld.utils.joints import humanml3d_joints, mmm2smplh_correspondence
 from model.t2sm import Text2StylizedMotion
@@ -75,6 +75,11 @@ def build_style_dataset(config: Dict) -> Dataset100STYLE:
     return Dataset100STYLE(style_cfg)
 
 
+def build_humanml_dataset(config: Dict, train: bool = False) -> DatasetHumanML3D:
+    hml_cfg = dict(config["dataset_hml"])
+    return DatasetHumanML3D(hml_cfg, train=train)
+
+
 def find_motion_meta(dataset: Dataset100STYLE, motion_id: str) -> Dict:
     motion_id = str(motion_id)
     for item in dataset.items:
@@ -88,6 +93,45 @@ def get_full_motion(dataset: Dataset100STYLE, motion_id: str, device: torch.devi
     meta = find_motion_meta(dataset, motion_id)
     motion = dataset.motion_cache[motion_id].to(device)
     return motion, int(meta["length"])
+
+
+def get_full_motion_with_caption(dataset, motion_id: str, device: torch.device) -> Tuple[torch.Tensor, int, str]:
+    motion_id = str(motion_id)
+    if isinstance(dataset, Dataset100STYLE):
+        motion, length = get_full_motion(dataset, motion_id, device)
+        meta = find_motion_meta(dataset, motion_id)
+        content_idx = int(meta["content_idx"])
+        content_key = dataset.idx_to_content[content_idx]
+        caption = dataset.content_prompts.get(content_key, "a person is moving")
+        return motion, length, caption
+
+    if isinstance(dataset, DatasetHumanML3D):
+        meta = None
+        for item in dataset.items:
+            if item["motion_id"] == motion_id:
+                meta = item
+                break
+        if meta is None:
+            raise ValueError(f"motion_id='{motion_id}' not found in HumanML3D dataset.")
+
+        path = os.path.join(dataset.motion_dir, f"{motion_id}.npy")
+        motion = np.load(path)
+        length = int(meta["length"])
+        window = torch.tensor((motion - dataset.mean) / dataset.std, dtype=torch.float32, device=device)
+
+        cap_path = os.path.join(dataset.text_dir, f"{motion_id}.txt")
+        caption = "a person is moving"
+        if os.path.exists(cap_path):
+            with open(cap_path, "r", encoding="utf-8") as f:
+                for ln in f:
+                    ln = ln.strip()
+                    if not ln:
+                        continue
+                    caption = ln.split("#")[0].strip() or caption
+                    break
+        return window, length, caption
+
+    raise TypeError(f"Unsupported dataset type for motion lookup: {type(dataset)!r}")
 
 
 def denormalize_motion(motion: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
@@ -162,6 +206,10 @@ def build_joint_name_map() -> Dict[str, int]:
 
 
 def resolve_joint_names(joint_names: Iterable[str]) -> Tuple[List[int], List[str]]:
+    joint_names = list(joint_names)
+    if any(name.strip().lower() == "all" for name in joint_names):
+        return list(range(len(humanml3d_joints))), ["all"]
+
     lookup = build_joint_name_map()
     indices: List[int] = []
     canonical: List[str] = []

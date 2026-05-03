@@ -24,14 +24,27 @@ from guidance_test_utils import (
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Test trajectory guidance for Text2StylizedMotion.")
+    parser = argparse.ArgumentParser(description="Test step-guided trajectory guidance for Text2StylizedMotion.")
     parser.add_argument("--config", type=str, required=True, help="Path to config YAML.")
     parser.add_argument("--ref_motion_id", type=str, required=True, help="100STYLE motion id used as style reference.")
-    parser.add_argument("--caption", type=str, default="a person walks in a circle", help="Content prompt.")
+    parser.add_argument("--caption", type=str, default="a person runs", help="Content prompt.")
     parser.add_argument("--output_length", type=int, default=140, help="Generated motion length in frames.")
     parser.add_argument("--num_samples", type=int, default=4, help="How many samples to draw with the same constraint.")
-    parser.add_argument("--radius", type=float, default=1.0, help="Circle radius in world-space root coordinates.")
-    parser.add_argument("--turns", type=float, default=1.0, help="How many turns the target circle should complete.")
+    parser.add_argument(
+        "--trajectory_shape",
+        type=str,
+        default="s_curve",
+        choices=["circle", "s_curve"],
+        help="Target trajectory shape used for guidance.",
+    )
+    parser.add_argument("--radius", type=float, default=1.0, help="Trajectory radius or lateral amplitude in world-space root coordinates.")
+    parser.add_argument("--turns", type=float, default=1.0, help="How many turns or S-curve oscillations the target should complete.")
+    parser.add_argument(
+        "--forward_length",
+        type=float,
+        default=4.0,
+        help="Forward distance covered by the S-curve along the root z axis. Ignored for circles.",
+    )
     parser.add_argument(
         "--run_tag",
         type=str,
@@ -64,19 +77,28 @@ def parse_args():
         help="Style guidance schedule within its active timestep window.",
     )
     parser.add_argument(
-        "--optimize_initial_noise_only",
-        action="store_true",
-        help="Optimize only the starting z_T against the final trajectory loss, then sample without per-step guidance.",
-    )
-    parser.add_argument("--noise_opt_steps", type=int, default=10, help="Outer optimization steps for z_T-only optimization.")
-    parser.add_argument("--noise_opt_lr", type=float, default=0.05, help="Learning rate for z_T-only optimization.")
-    parser.add_argument(
         "--num_inference_steps",
         type=int,
         default=50,
-        help="Number of DDIM denoising steps used for sampling and z_T-only optimization rollouts.",
+        help="Number of DDIM denoising steps used for step-guided sampling.",
     )
-    parser.add_argument("--guidance_steps", type=int, default=1, help="Inner guidance steps per diffusion step.")
+    parser.add_argument("--guidance_steps", type=int, default=1, help="Inner latent update steps per diffusion step.")
+    parser.add_argument("--style_guidance_steps", type=int, default=1, help="Style-only inner latent update steps per diffusion step.")
+    parser.add_argument("--trajectory_guidance_steps", type=int, default=1, help="Trajectory/motion inner latent update steps per diffusion step.")
+    parser.add_argument(
+        "--guidance_inner_mode",
+        type=str,
+        default="separate",
+        choices=["combined", "separate", "style_fixed_then_motion_recompute"],
+        help="Use one combined update, separate fixed-v style then motion passes, or a staged style-fixed then motion-recompute update per diffusion step.",
+    )
+    parser.add_argument(
+        "--guidance_order",
+        type=str,
+        default="style_then_motion",
+        choices=["style_then_motion", "motion_then_style"],
+        help="Order of separate style and motion inner updates when guidance_inner_mode=separate.",
+    )
     parser.add_argument(
         "--recompute_guided_v_pred",
         action="store_true",
@@ -98,6 +120,34 @@ def make_circular_trajectory(length: int, radius: float, turns: float, device: t
     return torch.stack([x, z], dim=-1)
 
 
+def make_s_curve_trajectory(length: int, amplitude: float, turns: float, forward_length: float, device: torch.device) -> torch.Tensor:
+    u = torch.linspace(0.0, 1.0, steps=length, device=device, dtype=torch.float32)
+    x = amplitude * torch.sin(2.0 * np.pi * turns * u)
+    z = forward_length * u
+    return torch.stack([x, z], dim=-1)
+
+
+def make_target_trajectory(
+    shape: str,
+    length: int,
+    radius: float,
+    turns: float,
+    forward_length: float,
+    device: torch.device,
+) -> torch.Tensor:
+    if shape == "circle":
+        return make_circular_trajectory(length=length, radius=radius, turns=turns, device=device)
+    if shape == "s_curve":
+        return make_s_curve_trajectory(
+            length=length,
+            amplitude=radius,
+            turns=turns,
+            forward_length=forward_length,
+            device=device,
+        )
+    raise ValueError(f"Unsupported trajectory shape: {shape}")
+
+
 def main():
     args = parse_args()
     set_seed(args.seed)
@@ -114,12 +164,23 @@ def main():
     output_lengths = torch.full((args.num_samples,), args.output_length, dtype=torch.long, device=device)
     captions = [args.caption] * args.num_samples
 
-    target_traj = make_circular_trajectory(args.output_length, args.radius, args.turns, device)
+    target_traj = make_target_trajectory(
+        shape=args.trajectory_shape,
+        length=args.output_length,
+        radius=args.radius,
+        turns=args.turns,
+        forward_length=args.forward_length,
+        device=device,
+    )
     target_traj_batch = target_traj.unsqueeze(0).repeat(args.num_samples, 1, 1)
     target_mask = torch.ones(args.num_samples, args.output_length, dtype=torch.bool, device=device)
 
     guidance = {
         "steps": args.guidance_steps,
+        "style_steps": args.style_guidance_steps,
+        "trajectory_steps": args.trajectory_guidance_steps,
+        "inner_mode": args.guidance_inner_mode,
+        "guidance_order": args.guidance_order,
         "num_inference_steps": args.num_inference_steps,
         "record_step_trajectory_loss": bool(args.print_step_trajectory_loss),
         "recompute_v_guided": bool(args.recompute_guided_v_pred),
@@ -133,6 +194,7 @@ def main():
             "weight": args.trajectory_weight,
             "target": target_traj_batch,
             "mask": target_mask,
+            "relative_to_start": True,
             "start_frac": args.trajectory_start_frac,
             "end_frac": args.trajectory_end_frac,
             "schedule": args.trajectory_schedule,
@@ -141,26 +203,13 @@ def main():
     if args.style_guidance_weight is not None:
         guidance["style"]["weight"] = args.style_guidance_weight
 
-    opt_info = None
-    if args.optimize_initial_noise_only:
-        stylized_norm, captions_out, opt_info = model.generate_with_optimized_initial_noise(
-            style_batch,
-            captions,
-            output_lengths,
-            style_lengths,
-            guidance=guidance,
-            noise_opt_steps=args.noise_opt_steps,
-            noise_opt_lr=args.noise_opt_lr,
-            num_inference_steps=args.num_inference_steps,
-        )
-    else:
-        stylized_norm, captions_out = model.generate(
-            style_batch,
-            captions,
-            output_lengths,
-            style_lengths,
-            guidance=guidance,
-        )
+    stylized_norm, captions_out = model.generate(
+        style_batch,
+        captions,
+        output_lengths,
+        style_lengths,
+        guidance=guidance,
+    )
     debug_info = model.get_last_debug_info()
 
     stylized_real = denormalize_motion(stylized_norm, mean, std)
@@ -170,20 +219,20 @@ def main():
     root_xz = motion_to_root_xz(stylized_real).detach().cpu().numpy()
     target_xz_np = target_traj.detach().cpu().numpy()
 
-    opt_tag = ""
-    if args.optimize_initial_noise_only:
-        opt_tag = f"_opt{args.noise_opt_steps}_lr{str(args.noise_opt_lr).replace('.', 'p')}"
-
     auto_tag = (
-        f"mode-{'zTonly' if args.optimize_initial_noise_only else 'step'}"
-        f"_n{args.num_inference_steps}"
-        f"{opt_tag}"
+        f"step_n{args.num_inference_steps}"
+        f"_{args.trajectory_shape}"
         f"traj-{args.trajectory_schedule}"
         f"_s{str(args.trajectory_start_frac).replace('.', 'p')}"
         f"_e{str(args.trajectory_end_frac).replace('.', 'p')}"
         f"_w{str(args.trajectory_weight).replace('.', 'p')}"
         f"_style-{str(args.style_guidance_weight if args.style_guidance_weight is not None else 'cfg').replace('.', 'p')}"
         f"_g{args.guidance_steps}"
+        f"_sg{args.style_guidance_steps}"
+        f"_tg{args.trajectory_guidance_steps}"
+        f"_im-{args.guidance_inner_mode}"
+        f"_go-{args.guidance_order}"
+        f"_rv{1 if args.recompute_guided_v_pred else 0}"
     )
     run_tag = slug(args.run_tag if args.run_tag else auto_tag, maxlen=120)
 
@@ -191,7 +240,10 @@ def main():
         config["result_dir"],
         "guidance_tests",
         "trajectory",
-        f"{args.ref_motion_id}_{slug(args.caption)}_r{str(args.radius).replace('.', 'p')}_{run_tag}",
+        (
+            f"{args.ref_motion_id}_{slug(args.caption)}_{slug(args.trajectory_shape)}"
+            f"_r{str(args.radius).replace('.', 'p')}_{run_tag}"
+        ),
     )
     ensure_dir(out_dir)
 
@@ -199,13 +251,17 @@ def main():
         os.path.join(out_dir, "metadata.json"),
         {
             "config": args.config,
+            "guidance_mode": "step_latent",
             "ref_motion_id": args.ref_motion_id,
             "caption": args.caption,
+            "trajectory_shape": args.trajectory_shape,
             "output_length": args.output_length,
             "num_samples": args.num_samples,
             "radius": args.radius,
             "turns": args.turns,
+            "forward_length": args.forward_length,
             "trajectory_weight": args.trajectory_weight,
+            "trajectory_relative_to_start": True,
             "trajectory_start_frac": args.trajectory_start_frac,
             "trajectory_end_frac": args.trajectory_end_frac,
             "trajectory_schedule": args.trajectory_schedule,
@@ -213,39 +269,48 @@ def main():
             "style_start_frac": args.style_start_frac,
             "style_end_frac": args.style_end_frac,
             "style_schedule": args.style_schedule,
-            "optimize_initial_noise_only": bool(args.optimize_initial_noise_only),
-            "noise_opt_steps": args.noise_opt_steps,
-            "noise_opt_lr": args.noise_opt_lr,
             "num_inference_steps": args.num_inference_steps,
             "guidance_steps": args.guidance_steps,
+            "style_guidance_steps": args.style_guidance_steps,
+            "trajectory_guidance_steps": args.trajectory_guidance_steps,
+            "guidance_inner_mode": args.guidance_inner_mode,
+            "guidance_order": args.guidance_order,
             "recompute_guided_v_pred": bool(args.recompute_guided_v_pred),
             "print_step_trajectory_loss": bool(args.print_step_trajectory_loss),
             "seed": args.seed,
-            "optimization_history": None if opt_info is None else opt_info["history"],
         },
     )
     if args.print_step_trajectory_loss:
         step_losses = debug_info.get("step_trajectory_losses", [])
         save_json(os.path.join(out_dir, "step_trajectory_losses.json"), step_losses)
-        print("\nPer-timestep trajectory loss:")
+        print("\nPer-timestep guidance losses:")
         for row in step_losses:
             step_idx = row.get("step_idx")
             step_idx_str = "?" if step_idx is None else str(step_idx)
             step_frac = row.get("step_frac")
             step_frac_str = "?" if step_frac is None else f"{step_frac:.3f}"
+            style_loss = row.get("style_loss")
+            style_loss_str = "None" if style_loss is None else f"{style_loss:.6f}"
             traj_loss = row.get("trajectory_loss")
             traj_loss_str = "None" if traj_loss is None else f"{traj_loss:.6f}"
+            style_weight = row.get("style_weight")
+            style_weight_str = "" if style_weight is None else f" style_w={style_weight:.6f}"
             weight = row.get("trajectory_weight")
             weight_str = "" if weight is None else f" weight={weight:.6f}"
             print(
                 f"  step={step_idx_str:>2} timestep={row['timestep']:>4} "
-                f"frac={step_frac_str} traj_loss={traj_loss_str}{weight_str}"
+                f"frac={step_frac_str} style_loss={style_loss_str}{style_weight_str} "
+                f"traj_loss={traj_loss_str}{weight_str}"
             )
     np.save(os.path.join(out_dir, "target_trajectory.npy"), target_xz_np)
     np.save(os.path.join(out_dir, "generated_root_xz.npy"), root_xz)
     np.save(os.path.join(out_dir, "stylized_motion.npy"), stylized_real.detach().cpu().numpy())
 
     ref_len = min(style_length, style_motion.shape[0])
+    np.save(
+        os.path.join(out_dir, "reference_style.npy"),
+        reference_real[0, :ref_len].detach().cpu().numpy(),
+    )
     save_motion_video(
         os.path.join(out_dir, "reference_style.mp4"),
         joints_reference[0][:ref_len].astype(np.float32),
@@ -256,6 +321,7 @@ def main():
     for idx in range(args.num_samples):
         sample_len = int(output_lengths[idx].item())
         title = captions_out[idx] if isinstance(captions_out, (list, tuple)) else args.caption
+        aligned_target_xz = target_xz_np[:sample_len] + root_xz[idx : idx + 1, :1, :]
         save_motion_video(
             os.path.join(out_dir, f"sample_{idx:02d}.mp4"),
             joints_stylized[idx][:sample_len].astype(np.float32),
@@ -264,7 +330,7 @@ def main():
         )
         plot_root_trajectory(
             os.path.join(out_dir, f"sample_{idx:02d}_trajectory.png"),
-            target_xz_np[:sample_len],
+            aligned_target_xz[0],
             root_xz[idx][:sample_len],
             title=f"sample {idx:02d}",
         )

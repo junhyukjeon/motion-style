@@ -153,6 +153,7 @@ class SmoodiEval():
     """
     def __init__(self, config, device="cuda:0"):
 
+        self.config = config
         self.device = device
         classifier_path = config.get(
             "style_classifier_path",

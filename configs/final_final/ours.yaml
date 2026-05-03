@@ -9,6 +9,7 @@ dataset_style:
   mean_path: ./checkpoints/t2m/Comp_v6_KLD005/meta/mean.npy
   std_path: ./checkpoints/t2m/Comp_v6_KLD005/meta/std.npy
   style_json: ./dataset/100style/100style_smoodi.json
+  excluded_styles: []
   content_json: ./dataset/100style/10content_smoodi.json
   unit_length: 4
   min_frames: 40

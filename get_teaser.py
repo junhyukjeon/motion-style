@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-from data.dataset import Dataset100Style, DatasetHumanML3D
+from data.dataset import Dataset100Style
 from data.sampler import StyleSampler
 from model.t2sm import Text2StylizedMotion
 from utils.motion import recover_from_ric
